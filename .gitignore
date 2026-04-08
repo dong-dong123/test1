@@ -6,3 +6,4 @@
 
 # Worktrees directory for isolated development
 .worktrees/
+.worktrees
