@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "wifi": {
+    "ssid": "宫廷玉液酒",
+    "password": "180onecup",
+    "autoConnect": true,
+    "timeout": 10000
+  },
+
+  "services": {
+    "speech": {
+      "default": "volcano",
+      "available": ["volcano", "baidu", "tencent"],
+      "volcano": {
+        "apiKey": "2015527679",
+        "secretKey": "R23gVDqaVB_j-TaRfNywkJnerpGGJtcB",
+        "endpoint": "https://openspeech.bytedance.com",
+        "language": "zh-CN"
+      }
+    },
+
+    "dialogue": {
+      "default": "coze",
+      "available": ["coze", "openai"],
+      "coze": {
+        "botId": "your_coze_bot_id",
+        "apiKey": "pat_bb81GCikaLf65LwNoWegodxDPKKnIF4byFusUdSRojzF9Q2MvYjYEZWqn0E2xNVd",
+        "endpoint": "https://api.coze.cn",
+        "streamEndpoint": "https://kfdcyyzqgx.coze.site/stream_run",
+        "personality": "friendly_assistant",
+        "model": "coze-model",
+        "projectId": "7625602998236004386",
+        "sessionId": "l_tnvlo49EWy6p9YUl8oC",
+        "temperature": 0.7,
+        "maxTokens": 1000,
+        "timeout": 15.0
+      }
+    }
+  },
+
+  "audio": {
+    "sampleRate": 16000,
+    "bitsPerSample": 16,
+    "channels": 1,
+    "vadThreshold": 0.3,
+    "wakeWord": "小智小智",
+    "wakeWordSensitivity": 0.8,
+    "volume": 80
+  },
+
+  "display": {
+    "brightness": 100,
+    "timeout": 30000,
+    "showWaveform": true,
+    "showHistory": true,
+    "maxHistoryLines": 10
+  },
+
+  "logging": {
+    "level": "INFO",
+    "output": ["serial"]
+  }
+}

@@ -2,6 +2,8 @@
 #define GLOBALS_H
 
 #include <Arduino.h>
+#undef SERIAL
+#undef DISPLAY
 
 // 系统版本
 #define SYSTEM_VERSION "1.0.0"

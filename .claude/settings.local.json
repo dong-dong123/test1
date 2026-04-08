@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:documentation.espressif.com)",
+      "Bash(mkdir -p images)",
+      "Bash(cp \"D:\\\\学习\\\\board.jpg\" images/)",
+      "Bash(convert board.jpg -resize 800x600 board_small.png)",
+      "Bash(magick board.jpg -resize 800x600 board_small.png)",
+      "Bash(pio --version)",
+      "Bash(python -m platformio --version)",
+      "Bash(~/.platformio/penv/Scripts/pio system:*)",
+      "Bash(~/.platformio/penv/Scripts/pio lib:*)",
+      "Bash(PYTHONIOENCODING=utf-8 ~/.platformio/penv/Scripts/pio pkg search ArduinoJson)",
+      "Bash(tasklist /FI 'IMAGENAME eq python.exe')",
+      "Bash(PYTHONIOENCODING=utf-8 ~/.platformio/penv/Scripts/pio settings get)",
+      "Bash(curl -s -I --connect-timeout 10 https://mirrors.tuna.tsinghua.edu.cn/platformio/)",
+      "Bash(curl -s -I --connect-timeout 10 https://mirrors.aliyun.com/platformio/)",
+      "Bash(curl -s --connect-timeout 10 https://api.platformio.org/status)",
+      "Bash(env)",
+      "Bash(echo \"http_proxy=$http_proxy, https_proxy=$https_proxy\")",
+      "Bash(PYTHONIOENCODING=utf-8 ~/.platformio/penv/Scripts/pio run)",
+      "Bash(PYTHONIOENCODING=utf-8 ~/.platformio/penv/Scripts/pio settings get package_index)",
+      "Bash(echo \"$HOME/.platformio/.pioconfig\")",
+      "Bash(grep -l ST7789 c:/Users/Admin/Documents/PlatformIO/Projects/OLED_test/.pio/libdeps/esp32dev/TFT_eSPI/User_Setups/*.h)"
+    ]
+  }
+}

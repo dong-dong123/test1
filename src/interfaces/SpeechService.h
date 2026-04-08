@@ -27,6 +27,9 @@ public:
     virtual String getName() const = 0;
     virtual bool isAvailable() const = 0;
     virtual float getCostPerRequest() const = 0;
+
+    // 错误处理
+    virtual String getLastError() const = 0;
 };
 
 #endif
