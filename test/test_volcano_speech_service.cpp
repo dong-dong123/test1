@@ -324,6 +324,15 @@ void test_stream_methods_not_implemented(void) {
     TEST_ASSERT_FALSE(volcanoService->synthesizeStreamGetChunk(chunk, isLast));
 }
 
+void test_async_state_initialization(void) {
+    // 测试异步状态初始化
+    // 服务创建后，异步识别应处于空闲状态
+    TEST_ASSERT_FALSE(volcanoService->isAsyncRecognitionInProgress());
+
+    // 验证最后请求ID初始化为0
+    TEST_ASSERT_EQUAL_UINT32(0, volcanoService->getLastAsyncRequestId());
+}
+
 void setup() {
     // 等待2秒让串口就绪
     delay(2000);
@@ -343,6 +352,7 @@ void setup() {
     RUN_TEST(test_config_update);
     RUN_TEST(test_error_handling);
     RUN_TEST(test_stream_methods_not_implemented);
+    RUN_TEST(test_async_state_initialization);
 
     UNITY_END();
 }
