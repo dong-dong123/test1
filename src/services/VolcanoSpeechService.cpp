@@ -415,7 +415,24 @@ bool VolcanoSpeechService::synthesize(const String &text, std::vector<uint8_t> &
 
     ESP_LOGI(TAG, "Synthesizing speech: %s", text.c_str());
 
-    bool success = callSynthesisAPI(text, audio_data);
+    bool success = false;
+
+    // Check if binary protocol is enabled and we have appId for TTS WebSocket
+    if (config.binaryProtocolEnabled && !config.appId.isEmpty()) {
+        // Use WebSocket binary protocol for synthesis
+        success = synthesizeViaWebSocket(text, audio_data);
+    } else {
+        // Fall back to HTTP API for backward compatibility
+        ESP_LOGI(TAG, "Using HTTP API for synthesis (binary protocol disabled or missing appId)");
+        success = callSynthesisAPI(text, audio_data);
+    }
+
+    // Log which protocol was used
+    if (config.binaryProtocolEnabled && !config.appId.isEmpty()) {
+        logEvent("synthesis_protocol", "websocket");
+    } else {
+        logEvent("synthesis_protocol", "http");
+    }
 
     if (success)
     {
