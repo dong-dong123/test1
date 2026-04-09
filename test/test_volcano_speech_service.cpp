@@ -62,9 +62,19 @@ class MockConfigManager : public ConfigManager {
 public:
     String apiKey;
     String secretKey;
+    String appId;
+    String cluster;
+    String uid;
+    String encoding;
+    int sampleRate;
+    float speedRatio;
+    bool binaryProtocolEnabled;
+    String webSocketSynthesisUnidirectionalEndpoint;
 
     MockConfigManager(const String& key = "test_api_key", const String& secret = "test_secret_key")
-        : apiKey(key), secretKey(secret) {}
+        : apiKey(key), secretKey(secret), appId("test_app_id"), cluster("volcano_engine"), uid("test_user_123"),
+          encoding("linear16"), sampleRate(16000), speedRatio(1.0f), binaryProtocolEnabled(true),
+          webSocketSynthesisUnidirectionalEndpoint("wss://openspeech.bytedance.com/api/v1/tts/ws/unidirectional") {}
 
     virtual String getString(const String& key, const String& defaultValue = "") override {
         if (key == "services.volcano.apiKey") return apiKey;
@@ -72,16 +82,23 @@ public:
         if (key == "services.volcano.region") return "cn-north-1";
         if (key == "services.volcano.language") return "zh-CN";
         if (key == "services.volcano.voice") return "zh-CN_female_standard";
+        if (key == "services.volcano.appId") return appId;
+        if (key == "services.volcano.cluster") return cluster;
+        if (key == "services.volcano.uid") return uid;
+        if (key == "services.volcano.encoding") return encoding;
+        if (key == "services.volcano.webSocketSynthesisUnidirectionalEndpoint") return webSocketSynthesisUnidirectionalEndpoint;
         return defaultValue;
     }
 
     virtual bool getBool(const String& key, bool defaultValue = false) override {
         if (key == "services.volcano.enablePunctuation") return true;
+        if (key == "services.volcano.binaryProtocolEnabled") return binaryProtocolEnabled;
         return defaultValue;
     }
 
     virtual float getFloat(const String& key, float defaultValue = 0.0f) override {
         if (key == "services.volcano.timeout") return 10.0f;
+        if (key == "services.volcano.speedRatio") return speedRatio;
         return defaultValue;
     }
 
@@ -90,7 +107,10 @@ public:
     virtual bool save() override { return true; }
     virtual bool resetToDefaults() override { return true; }
     virtual bool setString(const String& key, const String& value) override { return true; }
-    virtual int getInt(const String& key, int defaultValue = 0) override { return defaultValue; }
+    virtual int getInt(const String& key, int defaultValue = 0) override {
+        if (key == "services.volcano.sampleRate") return sampleRate;
+        return defaultValue;
+    }
     virtual bool setInt(const String& key, int value) override { return true; }
     virtual bool setFloat(const String& key, float value) override { return true; }
     virtual bool setBool(const String& key, bool value) override { return true; }
