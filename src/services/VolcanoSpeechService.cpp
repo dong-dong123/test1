@@ -1033,6 +1033,48 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     return true;
 }
 
+bool VolcanoSpeechService::synthesizeViaWebSocket(const String &text, std::vector<uint8_t> &audio_data) {
+    ESP_LOGI(TAG, "Using WebSocket binary protocol for synthesis");
+
+    // Create WebSocketSynthesisHandler instance
+    WebSocketSynthesisHandler handler(networkManager, configManager);
+
+    // Configure handler with TTS parameters from config
+    handler.setConfiguration(
+        config.appId,           // Application ID
+        config.secretKey,       // Access Token (stored in secretKey)
+        config.cluster,         // Cluster identifier
+        config.uid,             // User ID
+        config.voice,           // Voice type
+        config.encoding,        // Audio encoding
+        config.sampleRate,      // Sample rate
+        config.speedRatio       // Speed ratio
+    );
+
+    // Set timeouts from config (convert seconds to milliseconds)
+    uint32_t connectTimeoutMs = static_cast<uint32_t>(config.timeout * 1000);
+    uint32_t responseTimeoutMs = static_cast<uint32_t>(config.timeout * 1000);
+    uint32_t chunkTimeoutMs = 5000;  // Fixed chunk timeout
+
+    handler.setTimeouts(connectTimeoutMs, responseTimeoutMs, chunkTimeoutMs);
+
+    // Call WebSocket synthesis
+    bool success = handler.synthesizeViaWebSocket(
+        text,
+        audio_data,
+        config.webSocketSynthesisUnidirectionalEndpoint
+    );
+
+    if (!success) {
+        lastError = "WebSocket synthesis failed: " + handler.getLastError();
+        ESP_LOGE(TAG, "WebSocket synthesis failed: %s", handler.getLastError().c_str());
+    } else {
+        ESP_LOGI(TAG, "WebSocket synthesis successful, audio size: %u bytes", audio_data.size());
+    }
+
+    return success;
+}
+
 bool VolcanoSpeechService::callStreamRecognitionStart()
 {
     if (!networkManager || !networkManager->isConnected())
