@@ -48,6 +48,21 @@ private:
     String lastErrorMessage;
     bool audioHardwareAvailable;
 
+    // 音频累积
+    static const size_t MAIN_AUDIO_BUFFER_SIZE = 160000;  // 5秒音频（16000Hz * 2字节 * 5秒）
+    uint8_t audioBuffer[MAIN_AUDIO_BUFFER_SIZE];
+    size_t audioBufferPos;
+    uint32_t audioCollectionStartTime;
+
+    // 静音检测（双阈值迟滞）
+    float vadSpeechThreshold;     // VAD语音检测阈值 (0.0-1.0, 默认0.50)
+    float vadSilenceThreshold;    // VAD静音确认阈值 (0.0-1.0, 默认0.30)
+    uint32_t vadSilenceDuration;  // 静音持续时间阈值 (ms, 默认800)
+    bool vadInSpeechState;        // 当前是否在语音状态
+    bool vadSilenceDetected;      // 是否检测到静音
+    uint32_t vadSilenceStartTime; // 静音开始时间
+    uint32_t vadLastAudioTime;    // 最后有音频的时间
+
     // 初始化状态
     enum InitState {
         INIT_NONE,
@@ -76,6 +91,7 @@ private:
     void updateDisplayForState();
     void handleError(const String& error);
     void logEvent(const String& event, const String& details = "");
+    void handleAsyncRecognitionResult(const AsyncRecognitionResult& result);
 
 public:
     MainApplication();
@@ -95,6 +111,11 @@ public:
     SystemState getCurrentState() const { return currentState; }
     bool isReady() const { return initState == INIT_COMPLETE; }
     String getLastError() const { return lastErrorMessage; }
+
+    // 静音检测状态
+    bool hasDetectedSilence() const { return vadSilenceDetected && (millis() - vadSilenceStartTime >= vadSilenceDuration); }
+    uint32_t getSilenceDuration() const { return vadSilenceDetected ? (millis() - vadSilenceStartTime) : 0; }
+    void resetVadState() { vadSilenceDetected = false; vadSilenceStartTime = 0; vadLastAudioTime = millis(); }
 
     // 模块访问器（用于测试和调试）
     ConfigManager* getConfigManager() { return &configManager; }
