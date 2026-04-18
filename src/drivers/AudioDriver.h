@@ -100,6 +100,40 @@ public:
     bool testMic();
     bool testSpeaker();
 
+    // 音频质量监控
+    struct AudioQualityMetrics {
+        double rms;              // RMS值（0-32767）
+        double dbFS;             // dBFS值（负值，0为满量程）
+        double snrEstimate;      // 信噪比估计（dB）
+        int zeroCrossingRate;    // 零交叉率（Hz）
+        int16_t peakLevel;       // 峰值电平
+        int16_t noiseFloor;      // 噪声基底
+        float qualityScore;      // 质量评分（0.0-1.0）
+    };
+
+    AudioQualityMetrics getAudioQualityMetrics(const uint8_t* audioData, size_t length) const;
+    float calculateAudioQualityScore(const uint8_t* audioData, size_t length) const;
+    bool isAudioQualityAcceptable(const uint8_t* audioData, size_t length, float minScore = 0.5f) const;
+    void logAudioQualityReport(const uint8_t* audioData, size_t length, const char* context = nullptr) const;
+
+    // 硬件诊断工具
+    struct HardwareDiagnostics {
+        bool i2sDriverInstalled;
+        int dmaBufferCount;
+        int dmaBufferLength;
+        uint32_t sampleRate;
+        int bitsPerSample;
+        int zeroReadCount;          // 零读取计数
+        int bufferOverrunCount;     // 缓冲区溢出计数
+        int bufferUnderrunCount;    // 缓冲区欠载计数
+        float cpuUsagePercent;      // CPU使用率估计
+    };
+
+    HardwareDiagnostics getHardwareDiagnostics() const;
+    bool checkHardwareHealth() const;
+    void runHardwareDiagnostics() const;
+    bool diagnoseI2SConnection() const;
+
     // 任务句柄管理（带内存屏障确保多核心可见性）
     void clearRecordTaskHandle() {
         portMEMORY_BARRIER();

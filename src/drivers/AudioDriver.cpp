@@ -25,6 +25,7 @@ AudioDriver::AudioDriver() :
 
     // 默认I2S配置 - 针对INMP441麦克风优化
     // INMP441输出24位数据，使用32位I2S帧（24位数据 + 8位填充）
+    // 优化配置：增加DMA缓冲区，启用APLL，提高稳定性
     i2sConfig = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_TX),
         .sample_rate = 16000,
@@ -32,9 +33,9 @@ AudioDriver::AudioDriver() :
         .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,  // INMP441通常在右声道输出数据
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,   // 标准飞利浦I2S格式
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 4,
-        .dma_buf_len = 512,
-        .use_apll = false,
+        .dma_buf_count = 8,      // 从4增加到8，减少缓冲区溢出
+        .dma_buf_len = 1024,     // 从512增加到1024，容纳更多数据
+        .use_apll = true,        // 启用APLL提高时钟稳定性
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0,
         .mclk_multiple = I2S_MCLK_MULTIPLE_256,
@@ -1000,30 +1001,103 @@ void AudioDriver::recordTask(void* parameter) {
             int32_t* samples32 = (int32_t*)readBuffer;
             int16_t* samples16 = (int16_t*)readBuffer; // 原地转换
 
-            const float GAIN_FACTOR = 5.0f;
+            // 音频处理参数
             const int16_t MAX_SAMPLE = 32767;
             const int16_t MIN_SAMPLE = -32768;
 
+            // 自动增益控制（AGC）参数
+            static float currentGain = 3.0f;  // 初始增益
+            const float TARGET_RMS = 15000.0f;  // 目标RMS值
+            const float GAIN_ADJUST_RATE = 0.01f;  // 增益调整速率
+            const float MIN_GAIN = 1.0f;
+            const float MAX_GAIN = 10.0f;
+
+            // 噪声门参数
+            const int16_t NOISE_GATE_THRESHOLD = 500;  // 低于此值视为噪声
+            static int32_t dcOffset = 0;  // 直流偏移估计
+            const float DC_OFFSET_ALPHA = 0.001f;  // 直流偏移估计平滑因子
+
+            // 统计变量（原始24位数据）
+            int64_t rawSumSquares = 0;
+            int32_t rawSumSamples = 0;
+            int16_t rawMaxSample = 0;
+            int16_t rawMinSample = 0;
+
+            // 第一次循环：计算统计信息
             for (size_t i = 0; i < sampleCount32; i++) {
                 // 32位样本：高24位是音频数据，低8位为0
-                // 右移8位得到24位，再右移8位得到16位（或直接右移16位？）
-                // 实际测试：右移8位得到有效的16位样本
+                // 提取24位音频数据（右移8位）
                 int32_t sample32 = samples32[i];
-                int16_t sample16 = (int16_t)(sample32 >> 8); // 32位->16位
+                int32_t sample24 = sample32 >> 8;  // 32位->24位
 
-                // 应用增益（防止削波）
-                int32_t amplified = (int32_t)(sample16 * GAIN_FACTOR);
-                if (amplified > MAX_SAMPLE) amplified = MAX_SAMPLE;
-                if (amplified < MIN_SAMPLE) amplified = MIN_SAMPLE;
-                samples16[i] = (int16_t)amplified;
+                // 更新直流偏移估计（指数移动平均）
+                dcOffset = (int32_t)((1.0f - DC_OFFSET_ALPHA) * dcOffset + DC_OFFSET_ALPHA * sample24);
 
-                // 每64个样本检查一次停止标志，确保快速响应
-                if ((i & 0x3F) == 0x3F) { // i % 64 == 63
+                // 移除直流偏移
+                int32_t centeredSample = sample24 - dcOffset;
+
+                // 累积统计信息
+                rawSumSamples += centeredSample;
+                rawSumSquares += (int64_t)centeredSample * centeredSample;
+
+                if (centeredSample > rawMaxSample) rawMaxSample = (int16_t)(centeredSample >> 8);  // 粗略估计
+                if (centeredSample < rawMinSample) rawMinSample = (int16_t)(centeredSample >> 8);
+
+                // 每64个样本检查一次停止标志
+                if ((i & 0x3F) == 0x3F) {
                     portMEMORY_BARRIER();
                     bool shouldContinue = driver->isRecording;
                     portMEMORY_BARRIER();
                     if (!shouldContinue) {
                         ESP_LOGI(TAG, "Record task: flag cleared during audio conversion (i=%zu), breaking outer loop", i);
+                        goto outer_loop_exit;
+                    }
+                }
+            }
+
+            // 计算RMS并调整增益
+            double rawRms = (sampleCount32 > 0) ? sqrt((double)rawSumSquares / sampleCount32) : 0.0;
+            if (rawRms > 100.0) {  // 避免在静音时调整增益
+                float desiredGain = TARGET_RMS / rawRms;
+                // 限制增益范围并平滑调整
+                if (desiredGain < MIN_GAIN) desiredGain = MIN_GAIN;
+                if (desiredGain > MAX_GAIN) desiredGain = MAX_GAIN;
+                currentGain = currentGain * (1.0f - GAIN_ADJUST_RATE) + desiredGain * GAIN_ADJUST_RATE;
+            }
+
+            // 第二次循环：应用处理
+            for (size_t i = 0; i < sampleCount32; i++) {
+                // 提取24位音频数据
+                int32_t sample32 = samples32[i];
+                int32_t sample24 = sample32 >> 8;  // 32位->24位
+
+                // 移除直流偏移
+                int32_t centeredSample = sample24 - dcOffset;
+
+                // 应用自动增益
+                int32_t amplifiedSample = (int32_t)(centeredSample * currentGain);
+
+                // 24位->16位转换（右移8位）
+                int16_t sample16 = (int16_t)(amplifiedSample >> 8);
+
+                // 应用噪声门
+                if (abs(sample16) < NOISE_GATE_THRESHOLD) {
+                    sample16 = 0;
+                }
+
+                // 限制在16位范围内
+                if (sample16 > MAX_SAMPLE) sample16 = MAX_SAMPLE;
+                if (sample16 < MIN_SAMPLE) sample16 = MIN_SAMPLE;
+
+                samples16[i] = sample16;
+
+                // 每64个样本检查一次停止标志
+                if ((i & 0x3F) == 0x3F) {
+                    portMEMORY_BARRIER();
+                    bool shouldContinue = driver->isRecording;
+                    portMEMORY_BARRIER();
+                    if (!shouldContinue) {
+                        ESP_LOGI(TAG, "Record task: flag cleared during audio processing (i=%zu), breaking outer loop", i);
                         goto outer_loop_exit;
                     }
                 }
@@ -1090,6 +1164,38 @@ void AudioDriver::recordTask(void* parameter) {
                 // 如果前几次读取都是静音，警告可能的硬件问题
                 if (readCount <= 5 && rms < 10.0) {
                     ESP_LOGW(TAG, "WARNING: Audio appears silent (RMS=%.1f). Check microphone!", rms);
+                }
+
+                // 音频质量检查
+                if (rms > 0) {
+                    // 计算质量评分（0.0-1.0）
+                    float qualityScore = 0.0f;
+
+                    // RMS评分：目标>15000，满分为1.0
+                    float rmsScore = fminf(rms / 15000.0f, 1.0f);
+
+                    // 动态范围评分：范围越大越好
+                    int16_t dynamicRange = maxSample - minSample;
+                    float dynamicScore = fminf(dynamicRange / 30000.0f, 1.0f);
+
+                    // 零交叉率评分：目标范围1000-3000 Hz
+                    // 这里简化：使用固定值0.7，实际需要计算
+                    float zcrScore = 0.7f;
+
+                    // 综合评分
+                    qualityScore = rmsScore * 0.5f + dynamicScore * 0.3f + zcrScore * 0.2f;
+
+                    // 记录质量信息
+                    if (qualityScore < 0.3f) {
+                        ESP_LOGE(TAG, "POOR audio quality: score=%.2f, RMS=%.1f, range=[%d,%d]",
+                                qualityScore, rms, minSample, maxSample);
+                    } else if (qualityScore < 0.6f) {
+                        ESP_LOGW(TAG, "MEDIUM audio quality: score=%.2f, RMS=%.1f, range=[%d,%d]",
+                                qualityScore, rms, minSample, maxSample);
+                    } else if (readCount % 10 == 0) { // 避免日志过多
+                        ESP_LOGI(TAG, "GOOD audio quality: score=%.2f, RMS=%.1f, range=[%d,%d]",
+                                qualityScore, rms, minSample, maxSample);
+                    }
                 }
             }
 
