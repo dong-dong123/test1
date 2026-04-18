@@ -16,9 +16,9 @@ struct AudioDriverConfig {
 
     AudioDriverConfig() :
         sampleRate(16000),
-        bitsPerSample(I2S_BITS_PER_SAMPLE_16BIT),
-        channelFormat(I2S_CHANNEL_FMT_ONLY_LEFT),
-        bufferSize(4096),
+        bitsPerSample(I2S_BITS_PER_SAMPLE_32BIT),  // INMP441输出24位数据，使用32位I2S帧
+        channelFormat(I2S_CHANNEL_FMT_ONLY_RIGHT),  // INMP441通常在右声道输出数据
+        bufferSize(65536),  // 64KB缓冲区，可存储2秒16kHz 16-bit音频
         volume(80) {}
 };
 

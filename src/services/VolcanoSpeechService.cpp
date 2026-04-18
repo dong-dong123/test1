@@ -1,5 +1,6 @@
 #include "VolcanoSpeechService.h"
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <ArduinoJson.h>
 #include <time.h>
 #include <esp_system.h>
@@ -1622,7 +1623,20 @@ void VolcanoSpeechService::cleanupWebSocket()
 
             // 关键：给TLS堆栈时间清理内存，避免SSL内存分配失败
             ESP_LOGI(TAG, "Waiting for SSL resource cleanup...");
-            delay(1000);
+
+            // 记录清理前的内存状态
+            ESP_LOGI(TAG, "SSL memory before cleanup - Total: %u, Internal: %u, Min free: %u",
+                     esp_get_free_heap_size(),
+                     esp_get_free_internal_heap_size(),
+                     esp_get_minimum_free_heap_size());
+
+            delay(3000);  // 增加到3秒，确保SSL资源完全释放
+
+            // 记录清理后的内存状态
+            ESP_LOGI(TAG, "SSL memory after cleanup - Total: %u, Internal: %u, Min free: %u",
+                     esp_get_free_heap_size(),
+                     esp_get_free_internal_heap_size(),
+                     esp_get_minimum_free_heap_size());
         }
 
         ESP_LOGI(TAG, "Deleting WebSocket client");
@@ -3010,7 +3024,7 @@ bool VolcanoSpeechService::setupWebSocketForAsyncRequest()
         if (retry > 0) {
             ESP_LOGI(TAG, "WebSocket connection retry %d/%d", retry, maxRetries);
             webSocketClient->disconnect();
-            delay(500); // 重试前等待
+            delay(2000); // 重试前等待 - 增加延迟以允许SSL内存清理
 
             // 重新连接
             if (!webSocketClient->connect(STREAM_RECOGNITION_API, "")) {

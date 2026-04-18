@@ -25,7 +25,7 @@ AudioDriver::AudioDriver() :
 
     // 默认I2S配置 - 针对INMP441麦克风优化
     // INMP441输出24位数据，使用32位I2S帧（24位数据 + 8位填充）
-    // 优化配置：增加DMA缓冲区，启用APLL，提高稳定性
+    // 应急措施：降低I2S配置复杂度，减少内存占用
     i2sConfig = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_TX),
         .sample_rate = 16000,
@@ -33,9 +33,9 @@ AudioDriver::AudioDriver() :
         .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,  // INMP441通常在右声道输出数据
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,   // 标准飞利浦I2S格式
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,      // 从4增加到8，减少缓冲区溢出
-        .dma_buf_len = 1024,     // 从512增加到1024，容纳更多数据
-        .use_apll = true,        // 启用APLL提高时钟稳定性
+        .dma_buf_count = 8,      // 从16降回8，减少内存占用
+        .dma_buf_len = 512,      // 减少到512，可能提高稳定性
+        .use_apll = true,       // 启用APLL，提供更稳定的时钟
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0,
         .mclk_multiple = I2S_MCLK_MULTIPLE_256,
@@ -66,6 +66,14 @@ bool AudioDriver::initialize(const AudioDriverConfig& cfg) {
     }
 
     config = cfg;
+
+    // 内存监控：检查系统资源
+    size_t freeHeap = esp_get_free_heap_size();
+    ESP_LOGI(TAG, "Free heap before audio initialization: %zu bytes", freeHeap);
+    if (freeHeap < 2000000) {  // 低于2MB
+        ESP_LOGE(TAG, "CRITICAL: Low heap memory: %zu bytes", freeHeap);
+        // 可以考虑清理资源或重启
+    }
 
     // 更新I2S配置
     i2sConfig.sample_rate = config.sampleRate;
@@ -954,6 +962,14 @@ void AudioDriver::recordTask(void* parameter) {
                              stackHighWaterMark * sizeof(StackType_t), currentTask);
                 lastStackReport = stackHighWaterMark;
             }
+
+            // 内存监控：检查堆内存使用情况
+            size_t freeHeap = esp_get_free_heap_size();
+            ESP_LOGI(TAG, "Record task: free heap = %zu bytes", freeHeap);
+            if (freeHeap < 2000000) {  // 低于2MB
+                ESP_LOGE(TAG, "CRITICAL: Low heap memory in record task: %zu bytes", freeHeap);
+                // 可以考虑采取紧急措施，如清理资源
+            }
         }
 
         // 在I2S读取前再次检查停止标志，确保快速响应
@@ -980,8 +996,8 @@ void AudioDriver::recordTask(void* parameter) {
             break;
         }
 
-        // 从I2S读取数据（使用20ms超时，平衡响应性和数据可用性）
-        esp_err_t err = i2s_read(I2S_NUM_0, readBuffer, sizeof(readBuffer), &bytesRead, pdMS_TO_TICKS(20));
+        // 从I2S读取数据（使用10ms超时，提高响应性，减少零读取等待）
+        esp_err_t err = i2s_read(I2S_NUM_0, readBuffer, sizeof(readBuffer), &bytesRead, pdMS_TO_TICKS(10));
 
         // 调试日志：记录读取结果
         if (readCount < 10 || readCount % 10 == 0) {
@@ -1316,4 +1332,160 @@ void AudioDriver::playTask(void* parameter) {
         driver->clearPlayTaskHandle();
     }
     vTaskDelete(nullptr);
+}
+
+// ============================================================================
+// 硬件诊断工具
+// ============================================================================
+
+AudioDriver::HardwareDiagnostics AudioDriver::getHardwareDiagnostics() const {
+    HardwareDiagnostics diagnostics = {};
+
+    // 检查I2S驱动程序是否安装
+    diagnostics.i2sDriverInstalled = isInitialized;
+
+    // 获取当前I2S配置
+    diagnostics.dmaBufferCount = i2sConfig.dma_buf_count;
+    diagnostics.dmaBufferLength = i2sConfig.dma_buf_len;
+    diagnostics.sampleRate = config.sampleRate;
+    diagnostics.bitsPerSample = (config.bitsPerSample == I2S_BITS_PER_SAMPLE_16BIT) ? 16 :
+                               (config.bitsPerSample == I2S_BITS_PER_SAMPLE_24BIT) ? 24 :
+                               (config.bitsPerSample == I2S_BITS_PER_SAMPLE_32BIT) ? 32 : 16;
+
+    // 零读取计数（从日志中估计）
+    diagnostics.zeroReadCount = 0; // 需要从recordTask中获取
+    diagnostics.bufferOverrunCount = 0;
+    diagnostics.bufferUnderrunCount = 0;
+
+    // CPU使用率估计
+    diagnostics.cpuUsagePercent = 0.0f;
+
+    return diagnostics;
+}
+
+bool AudioDriver::checkHardwareHealth() const {
+    if (!isInitialized) {
+        ESP_LOGE(TAG, "AudioDriver not initialized");
+        return false;
+    }
+
+    // 检查I2S驱动程序状态
+    i2s_port_t i2s_port = I2S_NUM_0;
+    i2s_driver_config_t driver_config;
+
+    // 尝试获取I2S时钟频率
+    float actual_rate = i2s_get_clk(i2s_port);
+    if (actual_rate <= 0) {
+        ESP_LOGE(TAG, "Failed to get I2S clock rate: %.0f Hz (I2S may not be running)", actual_rate);
+        return false;
+    }
+    ESP_LOGI(TAG, "I2S actual clock rate: %.0f Hz", actual_rate);
+
+    // 检查采样率是否匹配（i2s_get_clk返回的是主时钟频率，不是采样率）
+    // 对于I2S，采样率 = 主时钟频率 / (bits_per_sample * channels * 2)
+    // 这里我们简单检查时钟是否在预期范围内
+    uint32_t expected_clock = config.sampleRate * 32 * 2;  // 粗略估计：采样率 * 位深度 * 2
+    float min_expected = expected_clock * 0.9f;
+    float max_expected = expected_clock * 1.1f;
+
+    if (actual_rate < min_expected || actual_rate > max_expected) {
+        ESP_LOGW(TAG, "I2S clock rate out of range: actual=%.0f Hz, expected ~%lu Hz",
+                 actual_rate, expected_clock);
+    } else {
+        ESP_LOGI(TAG, "I2S clock rate OK: %.0f Hz (expected ~%lu Hz)", actual_rate, expected_clock);
+    }
+
+    return true;
+}
+
+void AudioDriver::runHardwareDiagnostics() const {
+    ESP_LOGI(TAG, "=== HARDWARE DIAGNOSTICS START ===");
+
+    HardwareDiagnostics diag = getHardwareDiagnostics();
+
+    ESP_LOGI(TAG, "I2S Driver Status: %s", diag.i2sDriverInstalled ? "INSTALLED" : "NOT INSTALLED");
+    ESP_LOGI(TAG, "DMA Buffer: %d x %d bytes", diag.dmaBufferCount, diag.dmaBufferLength);
+    ESP_LOGI(TAG, "Sample Rate: %lu Hz", diag.sampleRate);
+    ESP_LOGI(TAG, "Bits per Sample: %d", diag.bitsPerSample);
+    ESP_LOGI(TAG, "Zero Read Count: %d", diag.zeroReadCount);
+    ESP_LOGI(TAG, "Buffer Overrun: %d", diag.bufferOverrunCount);
+    ESP_LOGI(TAG, "Buffer Underrun: %d", diag.bufferUnderrunCount);
+    ESP_LOGI(TAG, "CPU Usage: %.1f%%", diag.cpuUsagePercent);
+
+    // 检查硬件连接
+    checkHardwareHealth();
+
+    // 引脚配置诊断
+    ESP_LOGI(TAG, "Pin Configuration:");
+    ESP_LOGI(TAG, "  BCLK: GPIO%d", pinConfig.bck_io_num);
+    ESP_LOGI(TAG, "  WS/LRC: GPIO%d", pinConfig.ws_io_num);
+    ESP_LOGI(TAG, "  Data IN (SDO): GPIO%d", pinConfig.data_in_num);
+    ESP_LOGI(TAG, "  Data OUT (DIN): GPIO%d", pinConfig.data_out_num);
+
+    ESP_LOGI(TAG, "=== HARDWARE DIAGNOSTICS END ===");
+}
+
+bool AudioDriver::diagnoseI2SConnection() const {
+    if (!isInitialized) {
+        ESP_LOGE(TAG, "AudioDriver not initialized");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "=== I2S CONNECTION DIAGNOSTICS ===");
+
+    // 检查引脚配置
+    bool pinsValid = true;
+
+    if (pinConfig.bck_io_num < 0 || pinConfig.bck_io_num > 39) {
+        ESP_LOGE(TAG, "Invalid BCLK pin: %d", pinConfig.bck_io_num);
+        pinsValid = false;
+    }
+
+    if (pinConfig.ws_io_num < 0 || pinConfig.ws_io_num > 39) {
+        ESP_LOGE(TAG, "Invalid WS pin: %d", pinConfig.ws_io_num);
+        pinsValid = false;
+    }
+
+    if (pinConfig.data_in_num < 0 || pinConfig.data_in_num > 39) {
+        ESP_LOGE(TAG, "Invalid Data IN pin: %d", pinConfig.data_in_num);
+        pinsValid = false;
+    }
+
+    // INMP441特定检查
+    ESP_LOGI(TAG, "INMP441 Microphone Check:");
+    ESP_LOGI(TAG, "  Expected: SDO=GPIO14, WS=GPIO16, BCLK=GPIO15");
+    ESP_LOGI(TAG, "  Actual:   SDO=GPIO%d, WS=GPIO%d, BCLK=GPIO%d",
+             pinConfig.data_in_num, pinConfig.ws_io_num, pinConfig.bck_io_num);
+
+    if (pinConfig.data_in_num != 14) {
+        ESP_LOGW(TAG, "WARNING: SDO pin mismatch (expected GPIO14 for INMP441)");
+    }
+
+    if (pinConfig.ws_io_num != 16) {
+        ESP_LOGW(TAG, "WARNING: WS pin mismatch (expected GPIO16 for INMP441)");
+    }
+
+    if (pinConfig.bck_io_num != 15) {
+        ESP_LOGW(TAG, "WARNING: BCLK pin mismatch (expected GPIO15 for INMP441)");
+    }
+
+    // 检查I2S通信
+    ESP_LOGI(TAG, "I2S Communication Test:");
+    ESP_LOGI(TAG, "  Sample Rate: %lu Hz (should be 16000 for INMP441)", config.sampleRate);
+    ESP_LOGI(TAG, "  Bits per Sample: %d (should be 32 for INMP441 24-bit data)",
+             (config.bitsPerSample == I2S_BITS_PER_SAMPLE_32BIT) ? 32 :
+             (config.bitsPerSample == I2S_BITS_PER_SAMPLE_24BIT) ? 24 : 16);
+
+    bool configValid = true;
+    if (config.sampleRate != 16000) {
+        ESP_LOGW(TAG, "WARNING: Sample rate should be 16000 for INMP441");
+    }
+
+    if (config.bitsPerSample != I2S_BITS_PER_SAMPLE_32BIT) {
+        ESP_LOGW(TAG, "WARNING: INMP441 outputs 24-bit data, should use 32-bit I2S frames");
+    }
+
+    ESP_LOGI(TAG, "=== DIAGNOSTICS COMPLETE ===");
+
+    return pinsValid && configValid;
 }

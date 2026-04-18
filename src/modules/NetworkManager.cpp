@@ -1,6 +1,7 @@
 #include "NetworkManager.h"
 #include <esp_log.h>
 #include <esp_wifi.h>
+#include <esp_heap_caps.h>
 #include <WiFiManager.h>
 #include <nvs_flash.h>
 
@@ -802,6 +803,12 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
         http->setTimeout(config.timeout);
         http->setReuse(config.followRedirects);
         http->setFollowRedirects(config.followRedirects ? HTTPC_FORCE_FOLLOW_REDIRECTS : HTTPC_DISABLE_FOLLOW_REDIRECTS);
+
+        // SSL内存监控：记录连接前的内存状态
+        ESP_LOGI(TAG, "SSL memory before connection - Total heap: %u, Internal heap: %u, Min free: %u",
+                 esp_get_free_heap_size(),
+                 esp_get_free_internal_heap_size(),
+                 esp_get_minimum_free_heap_size());
 
         // 开始连接
         bool beginResult = http->begin(config.url);

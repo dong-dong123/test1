@@ -56,8 +56,8 @@
     "bitsPerSample": 16,
     "channels": 1,
     "vadSpeechThreshold": 0.50,
-    "vadSilenceThreshold": 0.30,
-    "vadSilenceDuration": 1200,
+    "vadSilenceThreshold": 0.20,
+    "vadSilenceDuration": 2500,
     "wakeWord": "小智小智",
     "wakeWordSensitivity": 0.8,
     "volume": 80

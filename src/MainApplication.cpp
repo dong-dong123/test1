@@ -854,6 +854,19 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
         double normalizedRMS = rms / 32768.0;
         currentTime = millis();
 
+        // 硬件问题检测：如果所有样本都为零，很可能是I2S中断，跳过VAD更新
+        if (maxSample == 0 && minSample == 0 && sampleCount > 0) {
+            Serial.printf("[VAD] WARNING: All samples zero (likely I2S interruption), skipping VAD update\n");
+            // 不更新VAD状态，保持当前状态
+            vadLastAudioTime = currentTime; // 更新最后音频时间
+            memcpy(audioBuffer + audioBufferPos, audioData, length);
+            audioBufferPos += length;
+            Serial.printf("[DEBUG] processAudioData: Audio accumulated, total=%zu bytes\n", audioBufferPos);
+
+            // 跳过VAD状态更新
+            goto skip_vad_update;
+        }
+
         // 双阈值迟滞状态机（按照设计文档实现）
         if (normalizedRMS > vadSpeechThreshold) {
             // 进入或保持语音状态
@@ -894,6 +907,7 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
         audioBufferPos += length;
         Serial.printf("[DEBUG] processAudioData: Audio accumulated, total=%zu bytes\n", audioBufferPos);
 
+    skip_vad_update:
         // 检查是否达到触发条件（只有在存储数据后才检查）
         if (audioBufferPos >= MIN_AUDIO_DURATION) {
             Serial.printf("[DEBUG] processAudioData: Minimum audio duration reached (%zu >= %zu)\n",
