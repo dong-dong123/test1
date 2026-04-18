@@ -15,7 +15,19 @@
         "apiKey": "2015527679",
         "secretKey": "R23gVDqaVB_j-TaRfNywkJnerpGGJtcB",
         "endpoint": "https://openspeech.bytedance.com",
-        "language": "zh-CN"
+        "language": "zh-CN",
+        "resourceId": "volc.bigasr.sauc.duration",
+        "ttsResourceId": "seed-tts-2.0",
+        "voice": "zh_female_sajiaonvyou_moon_bigtts",
+        "appId": "2015527679",
+        "cluster": "volcano_tts",
+        "encoding": "pcm",
+        "sampleRate": 16000,
+        "speedRatio": 1.0,
+        "binaryProtocolEnabled": true,
+        "useCompression": false,
+        "webSocketSynthesisUnidirectionalEndpoint": "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream",
+        "webSocketSynthesisBidirectionalEndpoint": "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
       }
     },
 
@@ -25,7 +37,7 @@
       "coze": {
         "botId": "your_coze_bot_id",
         "apiKey": "pat_bb81GCikaLf65LwNoWegodxDPKKnIF4byFusUdSRojzF9Q2MvYjYEZWqn0E2xNVd",
-        "endpoint": "https://api.coze.cn",
+        "endpoint": "https://kfdcyyzqgx.coze.site/run",
         "streamEndpoint": "https://kfdcyyzqgx.coze.site/stream_run",
         "personality": "friendly_assistant",
         "model": "coze-model",
@@ -42,7 +54,9 @@
     "sampleRate": 16000,
     "bitsPerSample": 16,
     "channels": 1,
-    "vadThreshold": 0.3,
+    "vadSpeechThreshold": 0.50,
+    "vadSilenceThreshold": 0.30,
+    "vadSilenceDuration": 1200,
     "wakeWord": "小智小智",
     "wakeWordSensitivity": 0.8,
     "volume": 80
@@ -57,7 +71,7 @@
   },
 
   "logging": {
-    "level": "INFO",
+    "level": "DEBUG",
     "output": ["serial"]
   }
 }

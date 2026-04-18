@@ -9,8 +9,8 @@
 #include "TTSRequestBuilder.h"
 #include "TTSResponseParser.h"
 #include "WebSocketClient.h"
-#include "NetworkManager.h"
-#include "ConfigManager.h"
+#include "../modules/NetworkManager.h"
+#include "../interfaces/ConfigManager.h"
 #include <ArduinoJson.h>
 
 #ifdef ARDUINO
@@ -27,6 +27,54 @@ static const char* TAG = "WebSocketSynthesisHandler";
 
 // Default endpoint for unidirectional TTS streaming
 const char* DEFAULT_TTS_UNIDIRECTIONAL_ENDPOINT = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream";
+
+// Generate Connect ID (UUID format)
+static SynthesisString generateConnectId() {
+    // Generate UUID version 4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+    SynthesisString uuid;
+
+#ifdef ARDUINO
+    // Arduino/ESP32 implementation using esp_random()
+    uuid.reserve(36);
+
+    // Generate 32 random hexadecimal characters
+    const char hexChars[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        uuid += hexChars[esp_random() & 0xF];
+    }
+
+    // Insert hyphens
+    uuid = uuid.substring(0, 8) + '-' + uuid.substring(8, 12) + '-' + uuid.substring(12, 16) + '-' + uuid.substring(16, 20) + '-' + uuid.substring(20);
+
+    // Set UUID version 4 (13th character as '4')
+    uuid[14] = '4';
+
+    // Set variant 1 (17th character as '8', '9', 'a', or 'b')
+    const char variants[] = {'8', '9', 'a', 'b'};
+    uuid[19] = variants[esp_random() & 0x3];
+#else
+    // Desktop implementation using rand()
+    uuid.reserve(36);
+
+    // Generate 32 random hexadecimal characters
+    const char hexChars[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        uuid += hexChars[rand() & 0xF];
+    }
+
+    // Insert hyphens
+    uuid = uuid.substr(0, 8) + '-' + uuid.substr(8, 4) + '-' + uuid.substr(12, 4) + '-' + uuid.substr(16, 4) + '-' + uuid.substr(20);
+
+    // Set UUID version 4 (13th character as '4')
+    uuid[14] = '4';
+
+    // Set variant 1 (17th character as '8', '9', 'a', or 'b')
+    const char variants[] = {'8', '9', 'a', 'b'};
+    uuid[19] = variants[rand() & 0x3];
+#endif
+
+    return uuid;
+}
 
 // Constructor
 WebSocketSynthesisHandler::WebSocketSynthesisHandler(
@@ -71,7 +119,7 @@ bool WebSocketSynthesisHandler::synthesizeViaWebSocket(
     ESP_LOGI(TAG, "Starting WebSocket synthesis for text: %s", text.c_str());
 
     // Validate input
-    if (text.empty()) {
+    if (text.isEmpty()) {
         lastError = "Text cannot be empty";
         ESP_LOGE(TAG, "%s", lastError.c_str());
         return false;
@@ -87,25 +135,28 @@ bool WebSocketSynthesisHandler::synthesizeViaWebSocket(
 
     // Load configuration from ConfigManager if available
     if (configManager) {
-        if (appId.empty()) {
-            appId = configManager->getString("services.volcano.appId", "");
+        if (appId.isEmpty()) {
+            appId = configManager->getString("services.speech.volcano.appId", "");
         }
-        if (accessToken.empty()) {
-            accessToken = configManager->getString("services.volcano.secretKey", "");
+        if (accessToken.isEmpty()) {
+            accessToken = configManager->getString("services.speech.volcano.secretKey", "");
         }
-        if (cluster.empty()) {
-            cluster = configManager->getString("services.volcano.cluster", "volcano_tts");
+        if (cluster.isEmpty()) {
+            cluster = configManager->getString("services.speech.volcano.cluster", "volcano_tts");
         }
-        if (uid.empty()) {
-            uid = configManager->getString("services.volcano.uid", "esp32_user");
+        if (uid.isEmpty()) {
+            uid = configManager->getString("services.speech.volcano.uid", "esp32_user");
         }
-        if (voiceType.empty()) {
-            voiceType = configManager->getString("services.volcano.voice", "zh-CN_female_standard");
+        if (voiceType.isEmpty()) {
+            voiceType = configManager->getString("services.speech.volcano.voice", "zh-CN_female_standard");
+        }
+        if (ttsResourceId.isEmpty()) {
+            ttsResourceId = configManager->getString("services.speech.volcano.ttsResourceId", "seed-tts-2.0");
         }
     }
 
     // Validate configuration
-    if (appId.empty() || accessToken.empty()) {
+    if (appId.isEmpty() || accessToken.isEmpty()) {
         lastError = "App ID or Access Token not configured";
         ESP_LOGE(TAG, "%s", lastError.c_str());
         isSynthesisInProgress = false;
@@ -113,7 +164,7 @@ bool WebSocketSynthesisHandler::synthesizeViaWebSocket(
     }
 
     // Connect to WebSocket endpoint
-    if (!connectWithAuth(endpoint.empty() ? DEFAULT_TTS_UNIDIRECTIONAL_ENDPOINT : endpoint)) {
+    if (!connectWithAuth(endpoint.isEmpty() ? DEFAULT_TTS_UNIDIRECTIONAL_ENDPOINT : endpoint)) {
         ESP_LOGE(TAG, "Failed to connect to WebSocket endpoint");
         isSynthesisInProgress = false;
         return false;
@@ -132,7 +183,7 @@ bool WebSocketSynthesisHandler::synthesizeViaWebSocket(
         speedRatio
     );
 
-    if (jsonRequest.empty()) {
+    if (jsonRequest.isEmpty()) {
         lastError = "Failed to build synthesis request JSON";
         ESP_LOGE(TAG, "%s", lastError.c_str());
         cleanup();
@@ -188,7 +239,8 @@ void WebSocketSynthesisHandler::setConfiguration(
     const SynthesisString& voiceType,
     const SynthesisString& encoding,
     int sampleRate,
-    float speedRatio
+    float speedRatio,
+    const SynthesisString& ttsResourceId
 ) {
     this->appId = appId;
     this->accessToken = accessToken;
@@ -198,6 +250,7 @@ void WebSocketSynthesisHandler::setConfiguration(
     this->encoding = encoding;
     this->sampleRate = sampleRate;
     this->speedRatio = speedRatio;
+    this->ttsResourceId = ttsResourceId;
 }
 
 // Set timeout values
@@ -225,27 +278,35 @@ bool WebSocketSynthesisHandler::connectWithAuth(const SynthesisString& endpoint)
         }
 
         // Set event callback
-        webSocketClient->setEventCallback([this](int event, const SynthesisString& message, const uint8_t* data, size_t length) {
+        webSocketClient->setEventCallback([this](WebSocketEvent event, const String& message, const uint8_t* data, size_t length) {
             this->handleWebSocketEvent(event, message, data, length);
         });
     }
 
     // Build authentication headers
     SynthesisString headers = "";
-    if (!appId.empty()) {
-        headers += "X-Api-App-Key: " + appId + "\r\n";
+    if (!appId.isEmpty()) {
+        headers += "X-Api-App-Id: " + appId + "\r\n";
     }
-    if (!accessToken.empty()) {
+    if (!accessToken.isEmpty()) {
         headers += "X-Api-Access-Key: " + accessToken + "\r\n";
     }
 
-    // Generate unique connection ID
-#ifdef ARDUINO
-    SynthesisString uuid = "esp32_tts_" + SynthesisString(millis()) + "_" + SynthesisString(rand());
-#else
-    SynthesisString uuid = "desktop_tts_" + SynthesisString(time(nullptr)) + "_" + SynthesisString(rand());
-#endif
+    // Add TTS resource ID header
+    if (!ttsResourceId.isEmpty()) {
+        headers += "X-Api-Resource-Id: " + ttsResourceId + "\r\n";
+    }
+
+    // Add sequence header (required for V3 API)
+    headers += "X-Api-Sequence: -1\r\n";
+
+    // Generate unique connection ID (UUID v4 format)
+    SynthesisString uuid = generateConnectId();
     headers += "X-Api-Connect-Id: " + uuid + "\r\n";
+    // Add protocol negotiation headers for better compatibility
+    // Temporarily commented to restore server response
+    // headers += "Accept-Encoding: identity\r\n"; // Request uncompressed responses
+    // headers += "Accept: application/json";      // Explicitly request JSON format
 
     ESP_LOGI(TAG, "WebSocket authentication headers configured");
     ESP_LOGV(TAG, "Headers:\n%s", headers.c_str());
@@ -285,8 +346,8 @@ bool WebSocketSynthesisHandler::sendSynthesisRequest(const SynthesisString& json
         return false;
     }
 
-    // Send JSON request as text message
-    if (!webSocketClient->sendText(jsonRequest)) {
+    // Send JSON request as text message (chunked to avoid SSL error -80)
+    if (!webSocketClient->sendTextChunked(jsonRequest, 128)) {
         lastError = "Failed to send synthesis request: " + webSocketClient->getLastError();
         ESP_LOGE(TAG, "%s", lastError.c_str());
         return false;
@@ -317,7 +378,7 @@ bool WebSocketSynthesisHandler::receiveAudioResponse(std::vector<uint8_t>& audio
         }
 
         // Process WebSocket events (non-blocking)
-        webSocketClient->poll();
+        webSocketClient->loop();
 
 #ifdef ARDUINO
         delay(10); // Small delay to prevent busy waiting
@@ -340,30 +401,30 @@ bool WebSocketSynthesisHandler::receiveAudioResponse(std::vector<uint8_t>& audio
 }
 
 // Handle WebSocket events
-void WebSocketSynthesisHandler::handleWebSocketEvent(int event, const SynthesisString& message, const uint8_t* data, size_t length) {
-    ESP_LOGD(TAG, "WebSocket event: %d", event);
+void WebSocketSynthesisHandler::handleWebSocketEvent(WebSocketEvent event, const String& message, const uint8_t* data, size_t length) {
+    ESP_LOGD(TAG, "WebSocket event: %d", static_cast<int>(event));
 
     switch (event) {
-    case 1: // CONNECTED
+    case WebSocketEvent::CONNECTED:
         ESP_LOGI(TAG, "WebSocket connected");
         break;
 
-    case 2: // DISCONNECTED
+    case WebSocketEvent::DISCONNECTED:
         ESP_LOGI(TAG, "WebSocket disconnected");
         isSynthesisInProgress = false;
         break;
 
-    case 3: // ERROR
+    case WebSocketEvent::ERROR:
         ESP_LOGE(TAG, "WebSocket error: %s", message.c_str());
         lastError = "WebSocket error: " + message;
         isSynthesisInProgress = false;
         break;
 
-    case 4: // TEXT_MESSAGE
+    case WebSocketEvent::TEXT_MESSAGE:
         parseWebSocketMessage(message);
         break;
 
-    case 5: // BINARY_MESSAGE
+    case WebSocketEvent::BINARY_MESSAGE:
         handleSynthesisAudio(data, length, false);
         break;
 

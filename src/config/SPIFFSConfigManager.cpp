@@ -137,6 +137,7 @@ bool SPIFFSConfigManager::parseJSONConfig(const String& jsonStr) {
                 config.services.volcanoSpeech.voice = volcano["voice"] | "zh-CN_female_standard";
                 config.services.volcanoSpeech.enablePunctuation = volcano["enablePunctuation"] | true;
                 config.services.volcanoSpeech.timeout = volcano["timeout"] | 10.0f;
+                config.services.volcanoSpeech.resourceId = volcano["resourceId"] | "volc.bigasr.sauc.duration";
             }
         }
 
@@ -178,7 +179,26 @@ bool SPIFFSConfigManager::parseJSONConfig(const String& jsonStr) {
         config.audio.sampleRate = audio["sampleRate"] | 16000;
         config.audio.bitsPerSample = audio["bitsPerSample"] | 16;
         config.audio.channels = audio["channels"] | 1;
-        config.audio.vadThreshold = audio["vadThreshold"] | 0.3f;
+
+        // 向后兼容性：处理旧vadThreshold配置迁移
+        if (audio.containsKey("vadThreshold") && !audio.containsKey("vadSpeechThreshold")) {
+            float oldThreshold = audio["vadThreshold"] | 0.3f;
+            config.audio.vadSpeechThreshold = oldThreshold + 0.2f; // 增加0.2作为语音阈值
+            config.audio.vadSilenceThreshold = oldThreshold - 0.1f; // 减少0.1作为静音阈值
+
+            // 确保阈值有效
+            if (config.audio.vadSpeechThreshold > 1.0f) config.audio.vadSpeechThreshold = 1.0f;
+            if (config.audio.vadSilenceThreshold < 0.0f) config.audio.vadSilenceThreshold = 0.0f;
+
+            Serial.printf("[CONFIG] Migrated old vadThreshold (%.2f) to dual thresholds: speech=%.2f, silence=%.2f\n",
+                         oldThreshold, config.audio.vadSpeechThreshold, config.audio.vadSilenceThreshold);
+        } else {
+            // 加载新的双阈值配置
+            config.audio.vadSpeechThreshold = audio["vadSpeechThreshold"] | 0.50f;
+            config.audio.vadSilenceThreshold = audio["vadSilenceThreshold"] | 0.30f;
+        }
+
+        config.audio.vadSilenceDuration = audio["vadSilenceDuration"] | 800;
         config.audio.wakeWord = audio["wakeWord"] | "小智小智";
         config.audio.wakeWordSensitivity = audio["wakeWordSensitivity"] | 0.8f;
         config.audio.volume = audio["volume"] | 80;
@@ -247,6 +267,7 @@ String SPIFFSConfigManager::generateJSONConfig() const {
     volcano["voice"] = config.services.volcanoSpeech.voice;
     volcano["enablePunctuation"] = config.services.volcanoSpeech.enablePunctuation;
     volcano["timeout"] = config.services.volcanoSpeech.timeout;
+    volcano["resourceId"] = config.services.volcanoSpeech.resourceId;
 
     // dialogue服务
     JsonObject dialogue = services.createNestedObject("dialogue");
@@ -275,7 +296,9 @@ String SPIFFSConfigManager::generateJSONConfig() const {
     audio["sampleRate"] = config.audio.sampleRate;
     audio["bitsPerSample"] = config.audio.bitsPerSample;
     audio["channels"] = config.audio.channels;
-    audio["vadThreshold"] = config.audio.vadThreshold;
+    audio["vadSpeechThreshold"] = config.audio.vadSpeechThreshold;
+    audio["vadSilenceThreshold"] = config.audio.vadSilenceThreshold;
+    audio["vadSilenceDuration"] = config.audio.vadSilenceDuration;
     audio["wakeWord"] = config.audio.wakeWord;
     audio["wakeWordSensitivity"] = config.audio.wakeWordSensitivity;
     audio["volume"] = config.audio.volume;
@@ -353,7 +376,9 @@ String SPIFFSConfigManager::getDefaultConfigJSON() {
     "sampleRate": 16000,
     "bitsPerSample": 16,
     "channels": 1,
-    "vadThreshold": 0.3,
+    "vadSpeechThreshold": 0.50,
+    "vadSilenceThreshold": 0.30,
+    "vadSilenceDuration": 800,
     "wakeWord": "小智小智",
     "wakeWordSensitivity": 0.8,
     "volume": 80
@@ -397,8 +422,14 @@ std::vector<String> SPIFFSConfigManager::getValidationErrors() const {
     if (config.audio.channels != 1 && config.audio.channels != 2) {
         errors.push_back("Audio: 声道数必须是1或2");
     }
-    if (config.audio.vadThreshold < 0.0f || config.audio.vadThreshold > 1.0f) {
-        errors.push_back("Audio: VAD阈值必须在0.0-1.0之间");
+    if (config.audio.vadSpeechThreshold < 0.0f || config.audio.vadSpeechThreshold > 1.0f) {
+        errors.push_back("Audio: VAD语音检测阈值必须在0.0-1.0之间");
+    }
+    if (config.audio.vadSilenceThreshold < 0.0f || config.audio.vadSilenceThreshold > 1.0f) {
+        errors.push_back("Audio: VAD静音确认阈值必须在0.0-1.0之间");
+    }
+    if (config.audio.vadSilenceThreshold >= config.audio.vadSpeechThreshold) {
+        errors.push_back("Audio: VAD静音确认阈值必须小于语音检测阈值");
     }
     if (config.audio.wakeWordSensitivity < 0.0f || config.audio.wakeWordSensitivity > 1.0f) {
         errors.push_back("Audio: 唤醒词敏感度必须在0.0-1.0之间");
@@ -488,6 +519,7 @@ String SPIFFSConfigManager::getValueByPath(const KeyPath& path) const {
                 if (path.field == "volcano.voice") return config.services.volcanoSpeech.voice;
                 if (path.field == "volcano.enablePunctuation") return config.services.volcanoSpeech.enablePunctuation ? "true" : "false";
                 if (path.field == "volcano.timeout") return String(config.services.volcanoSpeech.timeout);
+                if (path.field == "volcano.resourceId") return config.services.volcanoSpeech.resourceId;
             }
             else if (path.subsection == "dialogue") {
                 if (path.field == "default") return config.services.defaultDialogueService;
@@ -516,7 +548,11 @@ String SPIFFSConfigManager::getValueByPath(const KeyPath& path) const {
         if (path.field == "sampleRate") return String(config.audio.sampleRate);
         if (path.field == "bitsPerSample") return String(config.audio.bitsPerSample);
         if (path.field == "channels") return String(config.audio.channels);
-        if (path.field == "vadThreshold") return String(config.audio.vadThreshold, 2);
+        if (path.field == "vadSpeechThreshold") return String(config.audio.vadSpeechThreshold, 2);
+        if (path.field == "vadSilenceThreshold") return String(config.audio.vadSilenceThreshold, 2);
+        if (path.field == "vadSilenceDuration") return String(config.audio.vadSilenceDuration);
+        // 向后兼容：旧vadThreshold字段返回语音检测阈值
+        if (path.field == "vadThreshold") return String(config.audio.vadSpeechThreshold, 2);
         if (path.field == "wakeWord") return config.audio.wakeWord;
         if (path.field == "wakeWordSensitivity") return String(config.audio.wakeWordSensitivity, 2);
         if (path.field == "volume") return String(config.audio.volume);
@@ -576,6 +612,7 @@ bool SPIFFSConfigManager::setValueByPath(const KeyPath& path, const String& valu
                 if (path.field == "volcano.voice") { config.services.volcanoSpeech.voice = value; return true; }
                 if (path.field == "volcano.enablePunctuation") { config.services.volcanoSpeech.enablePunctuation = (value == "true" || value == "1"); return true; }
                 if (path.field == "volcano.timeout") { config.services.volcanoSpeech.timeout = value.toFloat(); return true; }
+                if (path.field == "volcano.resourceId") { config.services.volcanoSpeech.resourceId = value; return true; }
             }
             else if (path.subsection == "dialogue") {
                 if (path.field == "default") { config.services.defaultDialogueService = value; return true; }
@@ -604,7 +641,19 @@ bool SPIFFSConfigManager::setValueByPath(const KeyPath& path, const String& valu
         if (path.field == "sampleRate") { config.audio.sampleRate = value.toInt(); return true; }
         if (path.field == "bitsPerSample") { config.audio.bitsPerSample = value.toInt(); return true; }
         if (path.field == "channels") { config.audio.channels = value.toInt(); return true; }
-        if (path.field == "vadThreshold") { config.audio.vadThreshold = value.toFloat(); return true; }
+        if (path.field == "vadSpeechThreshold") { config.audio.vadSpeechThreshold = value.toFloat(); return true; }
+        if (path.field == "vadSilenceThreshold") { config.audio.vadSilenceThreshold = value.toFloat(); return true; }
+        if (path.field == "vadSilenceDuration") { config.audio.vadSilenceDuration = value.toInt(); return true; }
+        // 向后兼容：设置旧vadThreshold时同时更新两个新阈值
+        if (path.field == "vadThreshold") {
+            float oldThreshold = value.toFloat();
+            config.audio.vadSpeechThreshold = oldThreshold + 0.2f;
+            config.audio.vadSilenceThreshold = oldThreshold - 0.1f;
+            // 确保阈值有效
+            if (config.audio.vadSpeechThreshold > 1.0f) config.audio.vadSpeechThreshold = 1.0f;
+            if (config.audio.vadSilenceThreshold < 0.0f) config.audio.vadSilenceThreshold = 0.0f;
+            return true;
+        }
         if (path.field == "wakeWord") { config.audio.wakeWord = value; return true; }
         if (path.field == "wakeWordSensitivity") { config.audio.wakeWordSensitivity = value.toFloat(); return true; }
         if (path.field == "volume") { config.audio.volume = value.toInt(); return true; }

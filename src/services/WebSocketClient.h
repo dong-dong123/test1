@@ -27,6 +27,7 @@ private:
     WebSocketEventCallback eventCallback;
     bool connected;
     String lastError;
+    unsigned long connectionStartTime;
 
     // 静态事件处理函数（转发到实例）
     static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
@@ -57,6 +58,7 @@ public:
 
     // 消息发送
     bool sendText(const String& text);
+    bool sendTextChunked(const String& text, size_t chunkSize = 128);
     bool sendBinary(const uint8_t* data, size_t length);
     bool ping();
 

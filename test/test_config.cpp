@@ -59,8 +59,11 @@ void test_set_get_bool(void) {
 
 void test_set_get_float(void) {
     // 测试设置和获取浮点数
-    TEST_ASSERT_TRUE(configManager->setFloat("audio.vadThreshold", 0.5f));
-    TEST_ASSERT_FLOAT_WITHIN(0.01, 0.5f, configManager->getFloat("audio.vadThreshold"));
+    TEST_ASSERT_TRUE(configManager->setFloat("audio.vadSpeechThreshold", 0.5f));
+    TEST_ASSERT_FLOAT_WITHIN(0.01, 0.5f, configManager->getFloat("audio.vadSpeechThreshold"));
+
+    TEST_ASSERT_TRUE(configManager->setFloat("audio.vadSilenceThreshold", 0.3f));
+    TEST_ASSERT_FLOAT_WITHIN(0.01, 0.3f, configManager->getFloat("audio.vadSilenceThreshold"));
 
     TEST_ASSERT_TRUE(configManager->setFloat("audio.wakeWordSensitivity", 0.7f));
     TEST_ASSERT_FLOAT_WITHIN(0.01, 0.7f, configManager->getFloat("audio.wakeWordSensitivity"));

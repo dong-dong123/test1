@@ -23,6 +23,9 @@ class WebSocketClient;
 class NetworkManager;
 class ConfigManager;
 
+// Include WebSocketClient for WebSocketEvent enum
+#include "WebSocketClient.h"
+
 /// @brief Platform-independent string type
 #ifdef ARDUINO
 using SynthesisString = String;
@@ -108,7 +111,8 @@ public:
         const SynthesisString& voiceType = "zh-CN_female_standard",
         const SynthesisString& encoding = "pcm",
         int sampleRate = 16000,
-        float speedRatio = 1.0f
+        float speedRatio = 1.0f,
+        const SynthesisString& ttsResourceId = "seed-tts-2.0"
     );
 
     /**
@@ -152,7 +156,7 @@ private:
      * @param data Binary data (for BINARY_MESSAGE events)
      * @param length Length of binary data
      */
-    void handleWebSocketEvent(int event, const SynthesisString& message, const uint8_t* data, size_t length);
+    void handleWebSocketEvent(WebSocketEvent event, const String& message, const uint8_t* data, size_t length);
 
     /**
      * @brief Parse WebSocket text message
@@ -188,6 +192,7 @@ private:
     SynthesisString encoding;
     int sampleRate;
     float speedRatio;
+    SynthesisString ttsResourceId;
 
     // Timeouts
     uint32_t connectTimeoutMs;

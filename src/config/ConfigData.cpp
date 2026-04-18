@@ -18,8 +18,18 @@ bool SystemConfig::validate() const {
         return false;
     }
 
-    if (audio.vadThreshold < 0.0f || audio.vadThreshold > 1.0f) {
+    // 双阈值VAD验证
+    if (audio.vadSpeechThreshold < 0.0f || audio.vadSpeechThreshold > 1.0f) {
         return false;
+    }
+    if (audio.vadSilenceThreshold < 0.0f || audio.vadSilenceThreshold > 1.0f) {
+        return false;
+    }
+    if (audio.vadSpeechThreshold <= audio.vadSilenceThreshold) {
+        return false; // speech_threshold必须大于silence_threshold以实现迟滞效应
+    }
+    if (audio.vadSilenceDuration == 0 || audio.vadSilenceDuration > 30000) {
+        return false; // 静音持续时间必须在合理范围内（1ms-30s）
     }
 
     if (audio.wakeWordSensitivity < 0.0f || audio.wakeWordSensitivity > 1.0f) {

@@ -124,6 +124,7 @@ private:
     void notifyEvent(NetworkEvent event, const String& details = "");
     void updateStatus();
     bool loadConfig();
+    bool startWiFiManagerAutoConnect();
 
     // WiFi事件ID（用于移除事件回调）
     int32_t wifiEventId;
@@ -144,6 +145,7 @@ public:
     bool connect();
     bool disconnect();
     bool reconnect();
+    bool startWiFiManagerHotspot();  // 启动AP热点模式进行WiFi配置
     bool isConnected() const { return status.wifiConnected && status.hasIP; }
     const NetworkStatus& getStatus() const { return status; }
 

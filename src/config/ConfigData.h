@@ -24,6 +24,7 @@ struct SpeechServiceConfig {
     String voice;          // 语音合成音色
     bool enablePunctuation; // 是否启用标点预测
     float timeout;         // 超时时间（秒）
+    String resourceId;     // API资源ID，如 "volc.seedasr.sauc.duration"
 
     SpeechServiceConfig() :
         apiKey(""), secretKey(""),
@@ -32,7 +33,8 @@ struct SpeechServiceConfig {
         region("cn-north-1"),
         voice("zh-CN_female_standard"),
         enablePunctuation(true),
-        timeout(10.0f) {}
+        timeout(10.0f),
+        resourceId("volc.bigasr.sauc.duration") {}
 };
 
 struct DialogueServiceConfig {
@@ -80,14 +82,17 @@ struct AudioConfig {
     uint32_t sampleRate;
     uint8_t bitsPerSample;
     uint8_t channels;
-    float vadThreshold;
+    float vadSpeechThreshold;    // 新增：语音检测阈值
+    float vadSilenceThreshold;   // 新增：静音确认阈值
+    uint32_t vadSilenceDuration; // 修改：从float改为uint32_t，单位为ms
     String wakeWord;
     float wakeWordSensitivity;
     uint8_t volume;
 
     AudioConfig() :
         sampleRate(16000), bitsPerSample(16), channels(1),
-        vadThreshold(0.3), wakeWord("小智小智"),
+        vadSpeechThreshold(0.50f), vadSilenceThreshold(0.30f), // 新默认值
+        vadSilenceDuration(800), wakeWord("小智小智"),
         wakeWordSensitivity(0.8), volume(80) {}
 };
 

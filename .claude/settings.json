@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x test_v3_async.sh)",
+      "Bash(bash test_v3_async.sh)",
+      "Bash(chmod +x test_v3_auth.sh)",
+      "Bash(bash test_v3_auth.sh)",
+      "Bash(chmod +x test_v3_v1_auth.sh)",
+      "Bash(bash test_v3_v1_auth.sh)",
+      "Bash(chmod +x test_websocket_connect.sh)",
+      "Bash(bash test_websocket_connect.sh)",
+      "Bash(chmod +x test_wscat_websocket.sh)",
+      "Bash(bash test_wscat_websocket.sh)",
+      "Bash(chmod +x test_websocket_handshake.sh)",
+      "Bash(bash test_websocket_handshake.sh)",
+      "Bash(curl -i -X GET \"wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async\" -H \"Host: openspeech.bytedance.com\" -H \"Upgrade: websocket\" -H \"Connection: Upgrade\" -H \"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\" -H \"Sec-WebSocket-Version: 13\" -H \"X-Api-App-Key: 2015527679\" -H \"X-Api-Access-Key: R23gVDqaVB_j-TaRfNywkJnerpGGJtcB\" -H \"X-Api-Resource-Id: volc.seedasr.sauc.duration\" -H \"X-Api-Connect-Id: test-connect-123\" --http1.1 -s)",
+      "Bash(chmod +x \"c:\\\\Users\\\\Admin\\\\Documents\\\\PlatformIO\\\\Projects\\\\test1\\\\test_quick_ws_connect.sh\")",
+      "Bash(npm list:*)",
+      "Bash(curl -I \"https://openspeech.bytedance.com\" --max-time 10 -s)",
+      "Bash(openssl s_client -connect openspeech.bytedance.com:443 -brief)",
+      "Bash(npm --version)",
+      "Bash(python -c \"import uuid; print\\(str\\(uuid.uuid4\\(\\)\\)\\)\")",
+      "Bash(wscat -c \"wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async\" -H \"X-Api-App-Key: 2015527679\" -H \"X-Api-Access-Key: R23gVDqaVB_j-TaRfNywkJnerpGGJtcB\" -H \"X-Api-Resource-Id: volc.seedasr.sauc.concurrent\" -H \"X-Api-Connect-Id: 7509048d-4477-4de8-bd5d-d9b3300b3dda\")",
+      "Bash(python test_websocket_python.py)",
+      "Bash(pip install:*)",
+      "Bash(curl -i -X GET wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async -H 'Host: openspeech.bytedance.com' -H 'Upgrade: websocket' -H 'Connection: Upgrade' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Version: 13' -H 'X-Api-App-Key: 2015527679' -H 'X-Api-Access-Key: R23gVDqaVB_j-TaRfNywkJnerpGGJtcB' -H 'X-Api-Resource-Id: volc.seedasr.sauc.concurrent' -H 'X-Api-Connect-Id: test-connect-__CMDSUB_OUTPUT__' --http1.1 -s)",
+      "Bash(curl -v -X GET wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async -H 'Host: openspeech.bytedance.com' -H 'Upgrade: websocket' -H 'Connection: Upgrade' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Version: 13' -H 'X-Api-App-Key: 2015527679' -H 'X-Api-Access-Key: R23gVDqaVB_j-TaRfNywkJnerpGGJtcB' -H 'X-Api-Resource-Id: volc.seedasr.sauc.duration' -H 'X-Api-Connect-Id: __TRACKED_VAR__' --http1.1 --max-time 10)",
+      "Bash(curl -v -X GET wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream -H 'Host: openspeech.bytedance.com' -H 'Upgrade: websocket' -H 'Connection: Upgrade' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Version: 13' -H 'X-Api-App-Key: 2015527679' -H 'X-Api-Access-Key: R23gVDqaVB_j-TaRfNywkJnerpGGJtcB' -H 'X-Api-Resource-Id: volc.seedasr.sauc.duration' -H 'X-Api-Connect-Id: __TRACKED_VAR__' --http1.1 --max-time 10)",
+      "Bash(curl -v -X GET wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async -H 'Host: openspeech.bytedance.com' -H 'Upgrade: websocket' -H 'Connection: Upgrade' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Version: 13' -H 'X-Api-App-Key: 2015527679' -H 'X-Api-Access-Key: WRONG_TOKEN_123' -H 'X-Api-Resource-Id: volc.seedasr.sauc.duration' -H 'X-Api-Connect-Id: __TRACKED_VAR__' --http1.1 --max-time 10)",
+      "Bash(curl -v -X GET wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async -H 'Host: openspeech.bytedance.com' -H 'Upgrade: websocket' -H 'Connection: Upgrade' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Version: 13' -H 'X-Api-App-Key: 2015527679' -H 'X-Api-Access-Key: R23gVDqaVB_j-TaRfNywkJnerpGGJtcB' -H 'X-Api-Resource-Id: __TRACKED_VAR__' -H 'X-Api-Connect-Id: __TRACKED_VAR__' --http1.1 --max-time 10)",
+      "Bash(timeout 5 wscat -c wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async -H 'X-Api-App-Key: 2015527679' -H 'X-Api-Access-Key: R23gVDqaVB_j-TaRfNywkJnerpGGJtcB' -H 'X-Api-Resource-Id: volc.bigasr.sauc.duration' -H 'X-Api-Connect-Id: __TRACKED_VAR__')"
+    ]
+  }
+}

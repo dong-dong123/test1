@@ -22,6 +22,8 @@
 struct VolcanoSpeechConfig {
     String apiKey;
     String secretKey;
+    String resourceId;      // API资源ID，如 "volc.bigasr.sauc.duration"
+    String ttsResourceId;   // TTS资源ID，如 "seed-tts-2.0"
     String endpoint;        // API端点，如 "https://openspeech.bytedance.com"
     String region;          // 区域，如 "cn-north-1"
     String language;        // 语言，如 "zh-CN"
@@ -52,10 +54,12 @@ struct VolcanoSpeechConfig {
         endpoint("https://openspeech.bytedance.com"),
         region("cn-north-1"),
         language("zh-CN"),
+        resourceId("volc.bigasr.sauc.duration"),
+        ttsResourceId("seed-tts-2.0"),
         voice("zh-CN_female_standard"),
         enablePunctuation(true),
         timeout(10.0f),
-        asyncTimeout(5.0f),
+        asyncTimeout(120.0f),
         binaryProtocolEnabled(true),
         useCompression(false),
         webSocketRecognitionNoStreamEndpoint("wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"),
@@ -114,6 +118,7 @@ enum RecognitionErrorCode {
 enum AsyncRecognitionState {
     STATE_IDLE,              // 空闲，无进行中的请求
     STATE_CONNECTING,        // 连接WebSocket
+    STATE_CONNECTED,         // WebSocket连接已建立
     STATE_AUTHENTICATING,    // 发送认证
     STATE_SENDING_REQUEST,   // 发送完整客户端请求
     STATE_SENDING_AUDIO,     // 发送音频数据
@@ -154,6 +159,7 @@ private:
     static const char* SYNTHESIS_API;
     static const char* STREAM_RECOGNITION_API;
     static const char* NOSTREAM_RECOGNITION_API;
+    static const char* V2_RECOGNITION_API;
     static const char* STREAM_SYNTHESIS_API;
 
     // 内部方法
@@ -171,7 +177,7 @@ private:
     bool sendWebSocketRecognitionStart();
     bool sendWebSocketSynthesisStart(const String& text);
     void handleWebSocketEvent(WebSocketEvent event, const String& message, const uint8_t* data, size_t length);
-    void parseWebSocketMessage(const String& jsonMessage);
+    bool parseWebSocketMessage(const String& jsonMessage);
     void handleRecognitionResult(const String& text, bool isFinal);
     void handleSynthesisAudio(const uint8_t* data, size_t length, bool isFinal);
 
@@ -244,8 +250,8 @@ private:
     bool synthesizeViaWebSocket(const String &text, std::vector<uint8_t> &audio_data);
 
     // 二进制协议消息处理
-    void handleBinaryRecognitionResponse(const std::vector<uint8_t>& payload);
-    void handleBinaryErrorMessage(const std::vector<uint8_t>& payload);
+    void handleBinaryRecognitionResponse(const std::vector<uint8_t>& payload, uint32_t sequence);
+    void handleBinaryErrorMessage(const std::vector<uint8_t>& payload, uint32_t sequence);
 
     // 异步识别状态
     volatile bool asyncRecognitionInProgress;
@@ -270,8 +276,8 @@ private:
     void setupAsyncRecognitionState(RecognitionCallback callback = nullptr);
     void cleanupAsyncRecognitionState();
     bool setupWebSocketForAsyncRequest();
-    void handleAsyncBinaryRecognitionResponse(const std::vector<uint8_t>& payload);
-    void handleAsyncBinaryErrorMessage(const std::vector<uint8_t>& payload);
+    void handleAsyncBinaryRecognitionResponse(const std::vector<uint8_t>& payload, uint32_t sequence);
+    void handleAsyncBinaryErrorMessage(const std::vector<uint8_t>& payload, uint32_t sequence);
     void invokeAsyncCallback(const AsyncRecognitionResult& result);
 
     // 重试辅助方法

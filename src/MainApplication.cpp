@@ -23,7 +23,10 @@ MainApplication::MainApplication()
       vadInSpeechState(false),    // 初始状态：静音
       vadSilenceDetected(false),
       vadSilenceStartTime(0),
-      vadLastAudioTime(0) {
+      vadLastAudioTime(0),
+      recognitionPending(false),
+      recognitionTriggerTime(0),
+      recognitionActive(false) {
     // 初始化时间戳
     stateEntryTime = millis();
     // 清零音频缓冲区
@@ -197,7 +200,7 @@ bool MainApplication::initializeAudio(String& stageName) {
     audioConfig.bufferSize = MAIN_AUDIO_BUFFER_SIZE;
     audioConfig.volume = configManager.getInt("audio.volume", 80);
 
-    // 加载VAD参数
+    // 加载VAD参数（配置管理器已处理向后兼容性）
     vadSpeechThreshold = configManager.getFloat("audio.vadSpeechThreshold", 0.50f);
     vadSilenceThreshold = configManager.getFloat("audio.vadSilenceThreshold", 0.30f);
     vadSilenceDuration = configManager.getInt("audio.vadSilenceDuration", 800);
@@ -344,6 +347,21 @@ void MainApplication::update() {
         serviceManager.update();
     }
 
+    // 检查是否有待处理的识别请求（异步处理，避免在回调中执行状态转换）
+    if (recognitionPending && currentState == SystemState::LISTENING) {
+        Serial.printf("[VAD] Processing pending recognition: pending=%d, state=%s\n",
+                     recognitionPending, stateToString(currentState).c_str());
+
+        // 清除标志，防止重复处理
+        recognitionPending = false;
+
+        // 触发语音识别
+        changeState(SystemState::RECOGNIZING);
+
+        // 这里将添加服务检查和识别逻辑
+        Serial.printf("[VAD] State changed to RECOGNIZING, will process recognition in handleState\n");
+    }
+
     // 处理当前状态
     handleState();
 
@@ -365,7 +383,7 @@ void MainApplication::update() {
             break;
 
         case SystemState::RECOGNIZING:
-            if (stateDuration > 15000) { // 15秒超时
+            if (stateDuration > 120000) { // 120秒超时（覆盖流式识别服务器处理时间）
                 // 检查网络连接
                 if (WiFi.status() != WL_CONNECTED) {
                     handleError("网络连接中断，请检查WiFi");
@@ -377,14 +395,14 @@ void MainApplication::update() {
             break;
 
         case SystemState::THINKING:
-            if (stateDuration > 10000) { // 10秒超时
+            if (stateDuration > 20000) { // 20秒超时（Coze对话服务可能需要更长时间）
                 handleError("对话处理超时");
                 changeState(SystemState::IDLE);
             }
             break;
 
         case SystemState::SYNTHESIZING:
-            if (stateDuration > 30000) { // 30秒超时
+            if (stateDuration > 60000) { // 60秒超时（语音合成和流式接收可能需要更长时间）
                 handleError("语音合成超时");
                 changeState(SystemState::IDLE);
             }
@@ -425,6 +443,18 @@ void MainApplication::changeState(SystemState newState) {
         audioDriver.stopRecord();
     }
 
+    // 当离开RECOGNIZING状态时，重置识别活动标志
+    if (oldState == SystemState::RECOGNIZING) {
+        recognitionActive = false;
+        Serial.printf("[RECOGNITION] Left RECOGNIZING state, resetting recognitionActive flag\n");
+    }
+
+    // 当进入RECOGNIZING状态时，设置识别活动标志
+    if (newState == SystemState::RECOGNIZING) {
+        recognitionActive = false; // 将在handleState中设置为true
+        Serial.printf("[RECOGNITION] Entering RECOGNIZING state, recognitionActive=%d\n", recognitionActive);
+    }
+
     updateDisplayForState();
 }
 
@@ -449,7 +479,147 @@ void MainApplication::handleState() {
 
         case SystemState::RECOGNIZING:
             // 语音识别中，显示识别状态
-            // 处理在 processAudioData 中完成
+            // 执行语音识别（确保只执行一次）
+            static uint32_t recognitionStartTime = 0; // 仍然使用静态变量跟踪开始时间
+
+            if (!recognitionActive) {
+                recognitionActive = true;
+                recognitionStartTime = millis();
+                Serial.printf("[RECOGNITION] Starting recognition process, audio buffer size: %zu bytes\n", audioBufferPos);
+
+                // 录音可能在进入RECOGNIZING状态时已被stopRecord()停止，这是正常的
+                // 我们使用已经累积的音频数据进行识别
+                Serial.printf("[RECOGNITION] Audio buffer size: %zu bytes, recording active: %s\n",
+                             audioBufferPos, audioDriver.isRecordingActive() ? "yes" : "no");
+
+                // 检查是否有可用的语音服务
+                Serial.printf("[RECOGNITION] Checking service manager readiness...\n");
+                if (!serviceManager.isReady()) {
+                    Serial.println("[RECOGNITION] ServiceManager not ready");
+                    handleError("服务管理器未就绪");
+                    audioBufferPos = 0; // 重置缓冲区
+                    recognitionActive = false;
+                    break;
+                }
+                Serial.printf("[RECOGNITION] ServiceManager is ready\n");
+
+                Serial.printf("[RECOGNITION] Getting default speech service...\n");
+                SpeechService* speech = serviceManager.getDefaultSpeechService();
+                if (!speech) {
+                    Serial.println("[RECOGNITION] No default speech service");
+                    handleError("语音服务不可用");
+                    audioBufferPos = 0; // 重置缓冲区
+                    recognitionActive = false;
+                    break;
+                }
+                Serial.printf("[RECOGNITION] Got speech service: %p\n", speech);
+
+                Serial.printf("[RECOGNITION] Checking speech service availability...\n");
+                bool isAvailable = speech->isAvailable();
+                String serviceName = speech->getName();
+                Serial.printf("[RECOGNITION] Service name='%s', isAvailable=%s\n", serviceName.c_str(), isAvailable ? "true" : "false");
+
+                if (!isAvailable) {
+                    Serial.println("[RECOGNITION] Speech service not available");
+                    handleError("语音服务不可用");
+                    audioBufferPos = 0; // 重置缓冲区
+                    recognitionActive = false;
+                    break;
+                }
+
+                // 录音可能在进入RECOGNIZING状态时已被stopRecord()停止，这是正常的
+                // 我们使用已经累积的音频数据进行识别，录音停止不影响识别
+                if (!audioDriver.isRecordingActive()) {
+                    Serial.printf("[RECOGNITION] Recording stopped, but continuing with %zu bytes of accumulated audio\n", audioBufferPos);
+                }
+
+                // 尝试使用异步语音识别（如果支持）
+                Serial.printf("[RECOGNITION] Checking if service is volcano...\n");
+                if (serviceName == "volcano") {
+                    Serial.printf("[RECOGNITION] Service is volcano, attempting async recognition...\n");
+                    // 动态转换为VolcanoSpeechService以使用异步API
+                    VolcanoSpeechService* volcanoSpeech = static_cast<VolcanoSpeechService*>(speech);
+
+                    // 创建回调函数绑定到当前对象
+                    auto callback = [this](const AsyncRecognitionResult& result) {
+                        this->handleAsyncRecognitionResult(result);
+                    };
+
+                    // 调用异步识别（使用累积的音频数据）
+                    Serial.printf("[RECOGNITION] Calling recognizeAsync with %zu bytes...\n", audioBufferPos);
+                    bool asyncStarted = volcanoSpeech->recognizeAsync(audioBuffer, audioBufferPos, callback);
+                    Serial.printf("[RECOGNITION] recognizeAsync returned %s\n", asyncStarted ? "true" : "false");
+
+                    if (asyncStarted) {
+                        logEvent("async_recognition_started", String("异步识别已启动，长度: ") + String(audioBufferPos) + " 字节（累积）");
+                        Serial.printf("[RECOGNITION] Async recognition started successfully\n");
+                        // 状态保持在RECOGNIZING，直到回调被调用
+                        // 重置状态进入时间，避免WebSocket连接期间的超时
+                        stateEntryTime = millis();
+                        Serial.printf("[RECOGNITION] Reset state entry time to avoid timeout during WebSocket connection\n");
+                    } else {
+                        String error = volcanoSpeech->getLastError();
+                        Serial.printf("[RECOGNITION] Async recognition failed: %s\n", error.c_str());
+                        handleError("异步语音识别启动失败: " + error);
+                        recognitionActive = false;
+                        audioBufferPos = 0;
+                    }
+                } else {
+                    // 回退到同步识别
+                    Serial.printf("[RECOGNITION] Falling back to sync recognition for service '%s'\n", serviceName.c_str());
+                    String recognizedText;
+                    bool syncResult = speech->recognize(audioBuffer, audioBufferPos, recognizedText);
+                    Serial.printf("[RECOGNITION] sync recognize returned %s\n", syncResult ? "true" : "false");
+
+                    if (syncResult) {
+                        logEvent("recognition_success", String("识别结果: ") + recognizedText);
+                        Serial.printf("[RECOGNITION] Sync recognition successful: %s\n", recognizedText.c_str());
+
+                        // 重置状态进入时间，避免后续状态超时
+                        stateEntryTime = millis();
+                        Serial.printf("[RECOGNITION] Reset state entry time after successful sync recognition\n");
+
+                        // 优化内存使用顺序：语音识别完成后等待500ms再启动对话服务
+                        // 避免连续创建多个SSL连接导致内存分配失败
+                        ESP_LOGI(TAG, "Waiting 500ms before starting dialogue service...");
+                        delay(500);
+
+                        // 对话处理
+                        changeState(SystemState::THINKING);
+
+                        DialogueService* dialogue = serviceManager.getDefaultDialogueService();
+                        if (dialogue && dialogue->isAvailable()) {
+                            String response = dialogue->chat(recognizedText);
+                            logEvent("dialogue_response", String("对话响应: ") + response);
+                            playResponse(response);
+                        } else {
+                            // 降级策略：对话服务不可用时使用本地预设响应
+                            ESP_LOGW(TAG, "Dialogue service unavailable, using fallback response");
+                            String fallbackResponse = "抱歉，网络连接有问题，请稍后再试";
+                            logEvent("dialogue_fallback", "使用降级响应: " + fallbackResponse);
+                            playResponse(fallbackResponse);
+                        }
+                    } else {
+                        String error = speech->getLastError();
+                        Serial.printf("[RECOGNITION] Sync recognition failed: %s\n", error.c_str());
+                        handleError("语音识别失败: " + error);
+                        recognitionActive = false;
+                        audioBufferPos = 0;
+                    }
+                }
+
+                // 重置缓冲区（如果识别已启动，缓冲区将在识别完成后清理）
+                if (!recognitionActive) {
+                    audioBufferPos = 0;
+                }
+            } else {
+                // 识别活动中，检查是否超时（由update中的超时检查处理）
+                uint32_t elapsed = millis() - recognitionStartTime;
+                if (elapsed % 5000 == 0) {
+                    Serial.printf("[RECOGNITION] Recognition in progress for %u ms, audio buffer: %zu bytes\n",
+                                 elapsed, audioBufferPos);
+                }
+            }
             break;
 
         case SystemState::THINKING:
@@ -618,6 +788,7 @@ void MainApplication::stopListening() {
     if (currentState == SystemState::LISTENING) {
         audioDriver.stopRecord();
         changeState(SystemState::IDLE);
+        resetVadState(); // 重置VAD状态
         logEvent("listening_stop", "停止录音");
     }
 }
@@ -629,6 +800,12 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
     if (currentState != SystemState::LISTENING || length == 0) {
         Serial.printf("[DEBUG] processAudioData: Invalid state (%d) or length (%zu), skipping\n",
                       currentState, length);
+        return;
+    }
+
+    // 快速检查录音是否仍在进行（防止在stopRecord期间执行长时间操作）
+    if (!audioDriver.isRecordingActive()) {
+        Serial.printf("[DEBUG] processAudioData: Recording not active, skipping (state=%d)\n", currentState);
         return;
     }
 
@@ -673,27 +850,29 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
         Serial.printf("[AUDIO] Energy: RMS=%.1f, dB=%.1f, samples=%zu, max=%d, min=%d\n",
                      rms, db, sampleCount, maxSample, minSample);
 
-        // 静音检测：基于能量阈值判断是否包含语音
-        bool hasVoice = (rms / 32768.0) > vadThreshold;  // 将RMS转换为0-1范围并与阈值比较
-        Serial.printf("[VAD] hasVoice=%s (threshold=%.2f, rms_rel=%.4f)\n",
-                     hasVoice ? "true" : "false", vadThreshold, rms / 32768.0);
+        // 双阈值迟滞VAD算法
+        double normalizedRMS = rms / 32768.0;
         currentTime = millis();
 
-        if (hasVoice) {
-            // 有语音活动
-            vadLastAudioTime = currentTime;
+        // 双阈值迟滞状态机（按照设计文档实现）
+        if (normalizedRMS > vadSpeechThreshold) {
+            // 进入或保持语音状态
+            vadInSpeechState = true;
             if (vadSilenceDetected) {
                 vadSilenceDetected = false;
-                Serial.printf("[VAD] Voice activity detected, clearing silence flag\n");
+                Serial.printf("[VAD] Speech detected (rms_rel=%.4f > %.2f), clearing silence flag\n",
+                             normalizedRMS, vadSpeechThreshold);
             }
-        } else {
-            // 静音段
+        } else if (normalizedRMS < vadSilenceThreshold) {
+            // 进入或保持静音状态
+            vadInSpeechState = false;
+
             if (!vadSilenceDetected) {
                 // 第一次检测到静音
                 vadSilenceStartTime = currentTime;
                 vadSilenceDetected = true;
-                Serial.printf("[VAD] Silence start detected at %u ms (threshold: %.2f, actual: %.4f)\n",
-                             vadSilenceStartTime, vadThreshold, rms / 32768.0);
+                Serial.printf("[VAD] Silence start detected at %u ms (speech_thresh=%.2f, silence_thresh=%.2f, actual=%.4f)\n",
+                             vadSilenceStartTime, vadSpeechThreshold, vadSilenceThreshold, normalizedRMS);
             } else {
                 // 持续静音
                 uint32_t silenceDuration = currentTime - vadSilenceStartTime;
@@ -703,7 +882,13 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
                     shouldTrigger = true;
                 }
             }
+        } else {
+            // 中间区域：保持当前状态
+            // 不改变vadInSpeechState和vadSilenceDetected
         }
+
+        // 记录最后音频时间（无论状态）
+        vadLastAudioTime = currentTime;
 
         memcpy(audioBuffer + audioBufferPos, audioData, length);
         audioBufferPos += length;
@@ -734,19 +919,21 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
     Serial.printf("[VAD] Triggering recognition: audio=%zu bytes, silence_detected=%s, silence_duration=%u ms, has_long_silence=%s\n",
                  audioBufferPos, vadSilenceDetected ? "yes" : "no", silenceDuration, hasLongSilence ? "yes" : "no");
 
-    // 触发语音识别（changeState会自动停止录音）
-    changeState(SystemState::RECOGNIZING);
-    logEvent("audio_received", String("收到音频数据: ") + String(audioBufferPos) + " 字节（累积）");
+    // 设置异步识别触发标志，不直接调用changeState
+    recognitionPending = true;
+    recognitionTriggerTime = millis();
 
-    // 检查是否有可用的语音服务
-    Serial.printf("[DEBUG] processAudioData: Checking service manager readiness...\n");
-    if (!serviceManager.isReady()) {
-        Serial.println("[DEBUG] processAudioData: ServiceManager not ready");
-        handleError("服务管理器未就绪");
-        audioBufferPos = 0; // 重置缓冲区
-        return;
-    }
-    Serial.printf("[DEBUG] processAudioData: ServiceManager is ready\n");
+    // 重置VAD状态，准备下一次检测（但保留音频数据）
+    resetVadState();
+
+    logEvent("recognition_pending",
+             String("识别待处理: ") + String(audioBufferPos) + " 字节（累积）, silence_duration=" +
+             String(silenceDuration) + " ms, has_long_silence=" + (hasLongSilence ? "yes" : "no"));
+
+    Serial.printf("[VAD] Recognition pending flag set: audio=%zu bytes\n", audioBufferPos);
+
+    // 不进行状态转换或服务检查，这些将在update()方法中异步处理
+    return;
 
     Serial.printf("[DEBUG] processAudioData: Getting default speech service...\n");
     SpeechService* speech = serviceManager.getDefaultSpeechService();
@@ -766,6 +953,13 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
     if (!isAvailable) {
         Serial.println("[DEBUG] processAudioData: Speech service not available");
         handleError("语音服务不可用");
+        audioBufferPos = 0; // 重置缓冲区
+        return;
+    }
+
+    // 再次检查录音状态（异步识别启动可能耗时）
+    if (!audioDriver.isRecordingActive()) {
+        Serial.printf("[DEBUG] processAudioData: Recording stopped before async recognition, aborting\n");
         audioBufferPos = 0; // 重置缓冲区
         return;
     }

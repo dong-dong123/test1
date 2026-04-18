@@ -31,33 +31,55 @@ RequestString VolcanoRequestBuilder::buildFullClientRequest(
     const RequestString& format,
     int rate,
     int bits,
-    int channel
+    int channel,
+    const RequestString& codec,
+    const RequestString& appid,
+    const RequestString& token,
+    const RequestString& resourceId,
+    const RequestString& cluster
 ) {
     // Create JSON document with appropriate size for the request
-    // 1024 bytes should be sufficient for typical request
-    DynamicJsonDocument doc(1024);
+    // Increased to 2048 bytes to accommodate additional fields
+    DynamicJsonDocument doc(2048);
 
-    // Build user object
+    // Build user object (per Volcano customer service guidance)
     JsonObject user = doc.createNestedObject("user");
     user["uid"] = uid;
     user["platform"] = DEFAULT_PLATFORM;
     user["sdk_version"] = DEFAULT_SDK_VERSION;
 
+    // Note: app object removed per Volcano customer service guidance
+    // Authentication is done via X-Api-* HTTP headers, not JSON fields
+
     // Build audio object
     JsonObject audio = doc.createNestedObject("audio");
     audio["format"] = format;
+    audio["codec"] = codec;  // Add codec field
     audio["rate"] = rate;
     audio["bits"] = bits;
     audio["channel"] = channel;
     audio["language"] = language;
 
-    // Build request object
+    // Build request object (per Volcano customer service guidance)
     JsonObject request = doc.createNestedObject("request");
     request["reqid"] = generateUniqueReqId();
     request["model_name"] = DEFAULT_MODEL_NAME;
+    request["operation"] = "query";        // Required to start recognition (per Volcano analysis)
     request["enable_itn"] = enableITN;
     request["enable_punc"] = enablePunctuation;
     request["enable_ddc"] = enableDDC;
+    request["show_utterances"] = true;     // Required to get text in response
+    request["result_type"] = "full";       // Required for full recognition results
+
+    // VAD configuration for automatic silence detection (per Volcano customer service guidance)
+    // enable_nonstream: true enables second-pass recognition and VAD segmentation
+    request["enable_nonstream"] = true;    // Required for VAD-based sentence segmentation
+
+    // end_window_size: silence duration threshold for automatic stop (800ms = default)
+    request["end_window_size"] = 800;      // Auto-stop after 800ms silence (min 200)
+
+    // force_to_speech_time: minimum speech duration before allowing stop (1000ms)
+    request["force_to_speech_time"] = 1000; // Don't stop before 1 second of speech
 
     // Serialize JSON to string
     RequestString jsonString;

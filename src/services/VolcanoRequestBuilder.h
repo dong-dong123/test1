@@ -33,10 +33,15 @@ public:
      * @param enablePunctuation Enable punctuation restoration (default: true)
      * @param enableITN Enable inverse text normalization (default: false)
      * @param enableDDC Enable digital digit conversion (default: false)
-     * @param format Audio format (default: "pcm")
+     * @param format Audio format (default: "raw")
      * @param rate Audio sample rate in Hz (default: 16000)
      * @param bits Audio bit depth (default: 16)
      * @param channel Number of audio channels (default: 1)
+     * @param codec Audio codec (default: "raw")
+     * @param appid Application ID (default: empty string)
+     * @param token Application token (default: empty string)
+     * @param resourceId Resource identifier for authorization (default: empty string)
+     * @param cluster Cluster identifier (default: "volcengine_streaming_common")
      * @return JSON string containing the full client request
      * @note Returns empty string if JSON serialization fails
      */
@@ -46,10 +51,15 @@ public:
         bool enablePunctuation = true,
         bool enableITN = false,
         bool enableDDC = false,
-        const RequestString& format = "pcm",
+        const RequestString& format = "raw",
         int rate = 16000,
         int bits = 16,
-        int channel = 1
+        int channel = 1,
+        const RequestString& codec = "raw",
+        const RequestString& appid = "",
+        const RequestString& token = "",
+        const RequestString& resourceId = "",
+        const RequestString& cluster = "volcengine_streaming_common"
     );
 
     /**

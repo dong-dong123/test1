@@ -337,10 +337,7 @@ bool NetworkManager::connect()
         return false;
     }
 
-    // 修改：不再检查SSID配置，强制使用WiFiManager热点模式
-    ESP_LOGI(TAG, "Starting pure hotspot mode (no SSID required)");
-    ESP_LOGI(TAG, "Device will create 'XiaozhiAP' hotspot for mobile configuration");
-
+    // 检查是否已有有效的Wi-Fi配置
     if (isConnected())
     {
         ESP_LOGW(TAG, "Already connected to Wi-Fi");
@@ -353,93 +350,104 @@ bool NetworkManager::connect()
         ESP_LOGW(TAG, "Wi-Fi hardware not fully ready, but attempting connection anyway");
     }
 
+    // 检查是否有配置的SSID
+    if (wifiConfig.ssid.isEmpty())
+    {
+        ESP_LOGW(TAG, "No WiFi SSID configured, falling back to WiFiManager hotspot mode");
+        // 进入WiFiManager热点模式进行配置
+        return startWiFiManagerHotspot();
+    }
+
     ESP_LOGI(TAG, "Connecting to Wi-Fi: %s", wifiConfig.ssid.c_str());
     notifyEvent(NetworkEvent::WIFI_CONNECTING, wifiConfig.ssid);
 
-    // 设置连接参数
-    // 禁用Wi-Fi库的自动重连，使用我们自己的重连逻辑
-    WiFi.setAutoReconnect(false);
-    ESP_LOGI(TAG, "Wi-Fi library auto-reconnect disabled, using our own logic");
+    // 启用Wi-Fi库的自动重连，以便在连接断开时自动恢复
+    WiFi.setAutoReconnect(true);
+    ESP_LOGI(TAG, "Wi-Fi library auto-reconnect enabled");
 
-    // 强制使用WiFiManager智能配网（纯热点模式）
-    // 确保WiFiManager实例存在
-    if (!wifiManager)
+    // 尝试使用配置的凭证连接
+    WiFi.begin(wifiConfig.ssid.c_str(), wifiConfig.password.c_str());
+
+    // 等待连接，带超时
+    uint32_t startTime = millis();
+    bool connected = false;
+
+    ESP_LOGI(TAG, "Waiting for Wi-Fi connection (timeout: %u ms)...", wifiConfig.timeout);
+
+    while (millis() - startTime < wifiConfig.timeout)
     {
-        ESP_LOGW(TAG, "WiFiManager not created, creating instance...");
-        wifiManager = new WiFiManager();
-        // 配置WiFiManager参数
-        wifiManager->setConnectTimeout(30);       // 连接超时30秒
-        wifiManager->setConfigPortalTimeout(600); // 配置门户超时10分钟
-        wifiManager->setDebugOutput(true);        // 启用调试输出
-        wifiManager->setWiFiAPChannel(1);         // 使用通道1（兼容性最好）
-        wifiManager->setAPStaticIPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
-        ESP_LOGI(TAG, "WiFiManager instance created for pure hotspot mode");
+        wl_status_t status = WiFi.status();
+        if (status == WL_CONNECTED)
+        {
+            connected = true;
+            break;
+        }
+        else if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL)
+        {
+            ESP_LOGE(TAG, "Wi-Fi connection failed (status: %d)", status);
+            break;
+        }
+
+        delay(100); // 短暂延迟，避免忙等待
     }
 
-    ESP_LOGI(TAG, "Using pure WiFiManager hotspot mode (no config file dependency)");
-    ESP_LOGI(TAG, "Device will create 'XiaozhiAP' hotspot for mobile configuration");
-    Serial.println("[NetworkManager] Starting pure WiFiManager hotspot mode");
-    Serial.println("[NetworkManager] No config file reading - mobile configuration only");
-
-    // 启动智能配网
-    // autoConnect会阻塞直到连接成功或配置门户超时
-    // 第一个参数是AP名称，第二个是AP密码（空表示开放网络）
-    String apName = "XiaozhiAP";
-
-    // 配置WiFiManager AP参数
-    wifiManager->setAPCallback([](WiFiManager *wm)
-                               {
-            ESP_LOGI("NetworkManager", "WiFiManager AP started");
-            Serial.println("[NetworkManager] WiFiManager AP started - SSID: XiaozhiAP, IP: 192.168.4.1");
-
-            // 设置AP参数
-            WiFi.softAPsetHostname("xiaozhi.local");
-
-            // 记录AP信息
-            String apIP = WiFi.softAPIP().toString();
-            ESP_LOGI("NetworkManager", "AP IP address: %s", apIP.c_str());
-            ESP_LOGI("NetworkManager", "AP SSID: XiaozhiAP");
-            ESP_LOGI("NetworkManager", "AP is visible and broadcasting"); });
-
-    // 记录热点启动信息
-    ESP_LOGI(TAG, "Starting WiFi configuration portal...");
-    ESP_LOGI(TAG, "Hotspot: %s (no password)", apName.c_str());
-    ESP_LOGI(TAG, "Configuration page: http://192.168.4.1");
-    ESP_LOGI(TAG, "Hotspot will remain active for 10 minutes or until configured");
-    Serial.println("[NetworkManager] WiFi Configuration Portal Starting...");
-    Serial.println("[NetworkManager] Hotspot: XiaozhiAP (no password)");
-    Serial.println("[NetworkManager] Web interface: http://192.168.4.1");
-    Serial.println("[NetworkManager] Hotspot will stay active for 10 minutes");
-
-    // 启动配置门户（热点会一直存在，直到用户配置或超时）
-    bool configured = wifiManager->startConfigPortal(apName.c_str());
-
-    if (configured)
+    if (connected)
     {
-        ESP_LOGI(TAG, "WiFiManager configuration successful");
-        Serial.println("[NetworkManager] WiFi configuration successful via web portal");
+        ESP_LOGI(TAG, "Wi-Fi connected successfully!");
+        ESP_LOGI(TAG, "SSID: %s", WiFi.SSID().c_str());
+        ESP_LOGI(TAG, "IP Address: %s", WiFi.localIP().toString().c_str());
+        ESP_LOGI(TAG, "RSSI: %d dBm", WiFi.RSSI());
 
-        // 获取实际连接的SSID并更新配置
-        String connectedSSID = WiFi.SSID();
-        if (connectedSSID != wifiConfig.ssid && configManager)
-        {
-            // 更新配置文件中的SSID（密码WiFiManager已保存）
-            configManager->setString("wifi.ssid", connectedSSID);
-            ESP_LOGI(TAG, "Updated config SSID to: %s", connectedSSID.c_str());
-            Serial.printf("[NetworkManager] Updated WiFi config: %s\n", connectedSSID.c_str());
+        // 记录和设置DNS配置
+        IPAddress dns1 = WiFi.dnsIP(0);
+        IPAddress dns2 = WiFi.dnsIP(1);
+        if (dns1 != INADDR_NONE) {
+            ESP_LOGI(TAG, "DNS server 1: %s", dns1.toString().c_str());
+        } else {
+            ESP_LOGW(TAG, "DNS server 1 not set");
         }
+        if (dns2 != INADDR_NONE) {
+            ESP_LOGI(TAG, "DNS server 2: %s", dns2.toString().c_str());
+        }
+
+        // 设置备用DNS服务器（如果主DNS未设置或需要增强可靠性）
+        ESP_LOGI(TAG, "Ensuring backup DNS servers are configured...");
+        // 使用公共DNS：Google DNS (8.8.8.8) 和 114 DNS (114.114.114.114)
+        IPAddress primaryDNS(8, 8, 8, 8);
+        IPAddress secondaryDNS(114, 114, 114, 114);
+        // 使用 WiFi.config() 设置 DNS，保持 IP 和网关为 DHCP
+        WiFi.config(INADDR_NONE, INADDR_NONE, primaryDNS, secondaryDNS);
+        ESP_LOGI(TAG, "Backup DNS configured: primary=%s, secondary=%s",
+                primaryDNS.toString().c_str(), secondaryDNS.toString().c_str());
+
+        // 验证DNS设置
+        IPAddress verifyDNS1 = WiFi.dnsIP(0);
+        IPAddress verifyDNS2 = WiFi.dnsIP(1);
+        if (verifyDNS1 == primaryDNS || verifyDNS2 == primaryDNS ||
+            verifyDNS1 == secondaryDNS || verifyDNS2 == secondaryDNS) {
+            ESP_LOGI(TAG, "DNS configuration verified successfully");
+        } else {
+            ESP_LOGW(TAG, "DNS configuration may not have taken effect");
+        }
+
+        // 更新状态
+        status.wifiConnected = true;
+        status.hasIP = true;
+        status.localIP = WiFi.localIP().toString();
+        status.ssid = WiFi.SSID();
+        status.rssi = WiFi.RSSI();
+        status.connectionTime = millis();
+
+        notifyEvent(NetworkEvent::WIFI_CONNECTED, WiFi.SSID());
         return true;
     }
     else
     {
-        ESP_LOGW(TAG, "WiFiManager configuration portal timed out or was cancelled");
-        Serial.println("[NetworkManager] Configuration portal timed out (10 minutes)");
-        Serial.println("[NetworkManager] Hotspot has been closed");
+        ESP_LOGW(TAG, "Wi-Fi connection failed, falling back to WiFiManager hotspot mode");
+        notifyEvent(NetworkEvent::WIFI_CONNECTION_FAILED, "Connection timeout");
 
-        // 注意：这里返回false，但热点已经关闭
-        // 用户可以重新调用connect()再次启动热点
-        notifyEvent(NetworkEvent::WIFI_CONNECTION_FAILED, "Configuration timeout");
-        return false;
+        // 尝试使用WiFiManager自动连接（使用保存的凭证）
+        return startWiFiManagerAutoConnect();
     }
 }
 
@@ -479,12 +487,13 @@ void NetworkManager::handleWiFiEvent(arduino_event_id_t event, arduino_event_inf
 {
     switch (event)
     {
-    case ARDUINO_EVENT_WIFI_STA_START:
+    case ARDUINO_EVENT_WIFI_STA_START: {
         ESP_LOGI(TAG, "Wi-Fi STA started");
         Serial.println("[NetworkManager] Wi-Fi STA started");
         break;
+    }
 
-    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED: {
         status.wifiConnected = true;
         status.ssid = WiFi.SSID();
         status.localIP = WiFi.localIP().toString();
@@ -493,21 +502,59 @@ void NetworkManager::handleWiFiEvent(arduino_event_id_t event, arduino_event_inf
         ESP_LOGI(TAG, "IP address: %s", status.localIP.c_str());
         notifyEvent(NetworkEvent::WIFI_CONNECTED, status.ssid);
         break;
+    }
 
-    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP: {
         status.hasIP = true;
         status.localIP = WiFi.localIP().toString();
         status.connectionTime = millis();
         ESP_LOGI(TAG, "Got IP address: %s", status.localIP.c_str());
+
+        // 记录DNS配置
+        IPAddress dns1 = WiFi.dnsIP(0);
+        IPAddress dns2 = WiFi.dnsIP(1);
+        if (dns1 != INADDR_NONE) {
+            ESP_LOGI(TAG, "DNS server 1: %s", dns1.toString().c_str());
+        } else {
+            ESP_LOGW(TAG, "DNS server 1 not set");
+        }
+        if (dns2 != INADDR_NONE) {
+            ESP_LOGI(TAG, "DNS server 2: %s", dns2.toString().c_str());
+        }
+
+        // 设置备用DNS服务器（如果主DNS未设置）
+        if (dns1 == INADDR_NONE) {
+            ESP_LOGI(TAG, "Setting backup DNS servers...");
+            // 使用公共DNS：Google DNS (8.8.8.8) 和 114 DNS (114.114.114.114)
+            IPAddress primaryDNS(8, 8, 8, 8);
+            IPAddress secondaryDNS(114, 114, 114, 114);
+            // 使用 WiFi.config() 设置 DNS，保持 IP 和网关为 DHCP
+            WiFi.config(INADDR_NONE, INADDR_NONE, primaryDNS, secondaryDNS);
+            ESP_LOGI(TAG, "Backup DNS set: primary=%s, secondary=%s",
+                    primaryDNS.toString().c_str(), secondaryDNS.toString().c_str());
+
+            // 验证DNS设置
+            IPAddress verifyDNS1 = WiFi.dnsIP(0);
+            IPAddress verifyDNS2 = WiFi.dnsIP(1);
+            if (verifyDNS1 == primaryDNS || verifyDNS2 == primaryDNS ||
+                verifyDNS1 == secondaryDNS || verifyDNS2 == secondaryDNS) {
+                ESP_LOGI(TAG, "DNS configuration verified successfully");
+            } else {
+                ESP_LOGW(TAG, "DNS configuration may not have taken effect");
+            }
+        }
+
         notifyEvent(NetworkEvent::WIFI_GOT_IP, status.localIP);
         break;
+    }
 
-    case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP: {
         status.hasIP = false;
         status.localIP = "";
         ESP_LOGW(TAG, "Lost IP address");
         notifyEvent(NetworkEvent::WIFI_LOST_IP, "IP address lost");
         break;
+    }
 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
     {
@@ -607,14 +654,16 @@ void NetworkManager::handleWiFiEvent(arduino_event_id_t event, arduino_event_inf
         break;
     }
 
-    case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE:
+    case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: {
         ESP_LOGI(TAG, "Auth mode changed");
         break;
+    }
 
-    default:
+    default: {
         // 打印未知事件以便调试
         ESP_LOGI(TAG, "Unhandled Wi-Fi event: %d", event);
         break;
+    }
     }
 
     // 更新状态
@@ -1534,4 +1583,132 @@ void NetworkManager::clearSavedNetworks()
 
     ESP_LOGI(TAG, "All saved Wi-Fi networks cleared");
     ESP_LOGI(TAG, "Device will need to reconnect to Wi-Fi network");
+}
+
+// ============================================================================
+// WiFiManager辅助函数
+// ============================================================================
+
+bool NetworkManager::startWiFiManagerHotspot()
+{
+    ESP_LOGI(TAG, "Starting WiFiManager hotspot mode for configuration");
+
+    // 确保WiFiManager实例存在
+    if (!wifiManager)
+    {
+        ESP_LOGW(TAG, "WiFiManager not created, creating instance...");
+        wifiManager = new WiFiManager();
+        // 配置WiFiManager参数
+        wifiManager->setConnectTimeout(30);       // 连接超时30秒
+        wifiManager->setConfigPortalTimeout(600); // 配置门户超时10分钟
+        wifiManager->setDebugOutput(true);        // 启用调试输出
+        wifiManager->setWiFiAPChannel(1);         // 使用通道1（兼容性最好）
+        wifiManager->setAPStaticIPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+        ESP_LOGI(TAG, "WiFiManager instance created for hotspot mode");
+    }
+
+    String apName = "XiaozhiAP";
+
+    // 配置WiFiManager AP参数
+    wifiManager->setAPCallback([](WiFiManager *wm)
+                               {
+            ESP_LOGI("NetworkManager", "WiFiManager AP started");
+            Serial.println("[NetworkManager] WiFiManager AP started - SSID: XiaozhiAP, IP: 192.168.4.1");
+
+            // 设置AP参数
+            WiFi.softAPsetHostname("xiaozhi.local");
+
+            // 记录AP信息
+            String apIP = WiFi.softAPIP().toString();
+            ESP_LOGI("NetworkManager", "AP IP address: %s", apIP.c_str());
+            ESP_LOGI("NetworkManager", "AP SSID: XiaozhiAP");
+            ESP_LOGI("NetworkManager", "AP is visible and broadcasting"); });
+
+    // 记录热点启动信息
+    ESP_LOGI(TAG, "Starting WiFi configuration portal...");
+    ESP_LOGI(TAG, "Hotspot: %s (no password)", apName.c_str());
+    ESP_LOGI(TAG, "Configuration page: http://192.168.4.1");
+    ESP_LOGI(TAG, "Hotspot will remain active for 10 minutes or until configured");
+    Serial.println("[NetworkManager] WiFi Configuration Portal Starting...");
+    Serial.println("[NetworkManager] Hotspot: XiaozhiAP (no password)");
+    Serial.println("[NetworkManager] Web interface: http://192.168.4.1");
+    Serial.println("[NetworkManager] Hotspot will stay active for 10 minutes");
+
+    // 启动配置门户（热点会一直存在，直到用户配置或超时）
+    bool configured = wifiManager->startConfigPortal(apName.c_str());
+
+    if (configured)
+    {
+        ESP_LOGI(TAG, "WiFiManager configuration successful");
+        Serial.println("[NetworkManager] WiFi configuration successful via web portal");
+
+        // 获取实际连接的SSID并更新配置
+        String connectedSSID = WiFi.SSID();
+        if (connectedSSID != wifiConfig.ssid && configManager)
+        {
+            // 更新配置文件中的SSID（密码WiFiManager已保存）
+            configManager->setString("wifi.ssid", connectedSSID);
+            ESP_LOGI(TAG, "Updated config SSID to: %s", connectedSSID.c_str());
+            Serial.printf("[NetworkManager] Updated WiFi config: %s\n", connectedSSID.c_str());
+        }
+        return true;
+    }
+    else
+    {
+        ESP_LOGW(TAG, "WiFiManager configuration portal timed out or was cancelled");
+        Serial.println("[NetworkManager] Configuration portal timed out (10 minutes)");
+        Serial.println("[NetworkManager] Hotspot has been closed");
+
+        // 注意：这里返回false，但热点已经关闭
+        // 用户可以重新调用connect()再次启动热点
+        notifyEvent(NetworkEvent::WIFI_CONNECTION_FAILED, "Configuration timeout");
+        return false;
+    }
+}
+
+bool NetworkManager::startWiFiManagerAutoConnect()
+{
+    ESP_LOGI(TAG, "Starting WiFiManager auto-connect (using saved credentials)");
+
+    // 确保WiFiManager实例存在
+    if (!wifiManager)
+    {
+        ESP_LOGW(TAG, "WiFiManager not created, creating instance...");
+        wifiManager = new WiFiManager();
+        // 配置WiFiManager参数
+        wifiManager->setConnectTimeout(30);       // 连接超时30秒
+        wifiManager->setConfigPortalTimeout(600); // 配置门户超时10分钟
+        wifiManager->setDebugOutput(true);        // 启用调试输出
+        wifiManager->setWiFiAPChannel(1);         // 使用通道1（兼容性最好）
+        wifiManager->setAPStaticIPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+        ESP_LOGI(TAG, "WiFiManager instance created for auto-connect");
+    }
+
+    // 使用autoConnect尝试连接，如果失败则启动热点
+    String apName = "XiaozhiAP";
+    bool connected = wifiManager->autoConnect(apName.c_str());
+
+    if (connected)
+    {
+        ESP_LOGI(TAG, "WiFiManager auto-connect successful");
+        ESP_LOGI(TAG, "SSID: %s", WiFi.SSID().c_str());
+        ESP_LOGI(TAG, "IP Address: %s", WiFi.localIP().toString().c_str());
+
+        // 更新状态
+        status.wifiConnected = true;
+        status.hasIP = true;
+        status.localIP = WiFi.localIP().toString();
+        status.ssid = WiFi.SSID();
+        status.rssi = WiFi.RSSI();
+        status.connectionTime = millis();
+
+        notifyEvent(NetworkEvent::WIFI_CONNECTED, WiFi.SSID());
+        return true;
+    }
+    else
+    {
+        ESP_LOGW(TAG, "WiFiManager auto-connect failed (user cancelled or timeout)");
+        notifyEvent(NetworkEvent::WIFI_CONNECTION_FAILED, "Auto-connect failed");
+        return false;
+    }
 }

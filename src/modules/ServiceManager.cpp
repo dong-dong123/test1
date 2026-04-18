@@ -739,7 +739,7 @@ void ServiceManager::printServiceInfo() const {
                 status == ServiceStatus::DEGRADED ? "DEGRADED" :
                 status == ServiceStatus::UNHEALTHY ? "UNHEALTHY" :
                 status == ServiceStatus::INITIALIZING ? "INITIALIZING" :
-                status == ServiceStatus::DISABLED ? "DISABLED" : "UNKNOWN");
+                status == ServiceStatus::DISABLED_STATUS ? "DISABLED" : "UNKNOWN");
     }
 
     ESP_LOGI(TAG, "--- Dialogue Services (%u) ---", getTotalDialogueServices());
@@ -752,7 +752,7 @@ void ServiceManager::printServiceInfo() const {
                 status == ServiceStatus::DEGRADED ? "DEGRADED" :
                 status == ServiceStatus::UNHEALTHY ? "UNHEALTHY" :
                 status == ServiceStatus::INITIALIZING ? "INITIALIZING" :
-                status == ServiceStatus::DISABLED ? "DISABLED" : "UNKNOWN");
+                status == ServiceStatus::DISABLED_STATUS ? "DISABLED" : "UNKNOWN");
     }
     ESP_LOGI(TAG, "=============================");
 }

@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <driver/i2s.h>
+#include "freertos/portmacro.h"
 #include "PinDefinitions.h"
 
 // 音频驱动配置结构（硬件相关）
@@ -34,10 +35,10 @@ private:
     // 音频配置
     AudioDriverConfig config;
 
-    // 状态标志
+    // 状态标志（volatile确保多任务环境下的可见性）
     bool isInitialized;
-    bool isRecording;
-    bool isPlaying;
+    volatile bool isRecording;
+    volatile bool isPlaying;
 
     // 回调函数
     AudioDataCallback recordCallback;
@@ -99,18 +100,26 @@ public:
     bool testMic();
     bool testSpeaker();
 
-    // 任务句柄管理
-    void clearRecordTaskHandle() { recordTaskHandle = nullptr; }
-    void clearPlayTaskHandle() { playTaskHandle = nullptr; }
+    // 任务句柄管理（带内存屏障确保多核心可见性）
+    void clearRecordTaskHandle() {
+        portMEMORY_BARRIER();
+        recordTaskHandle = nullptr;
+        portMEMORY_BARRIER();
+    }
+    void clearPlayTaskHandle() {
+        portMEMORY_BARRIER();
+        playTaskHandle = nullptr;
+        portMEMORY_BARRIER();
+    }
 
 private:
     // 任务函数（静态）
     static void recordTask(void* parameter);
     static void playTask(void* parameter);
 
-    // 任务句柄
-    TaskHandle_t recordTaskHandle;
-    TaskHandle_t playTaskHandle;
+    // 任务句柄（volatile确保多核心可见性）
+    volatile TaskHandle_t recordTaskHandle;
+    volatile TaskHandle_t playTaskHandle;
 };
 
 #endif // AUDIO_DRIVER_H

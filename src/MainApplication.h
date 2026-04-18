@@ -63,6 +63,11 @@ private:
     uint32_t vadSilenceStartTime; // 静音开始时间
     uint32_t vadLastAudioTime;    // 最后有音频的时间
 
+    // 识别触发标志（解决回调执行期间无法响应停止信号的问题）
+    bool recognitionPending;      // 是否有待处理的识别请求
+    uint32_t recognitionTriggerTime; // 识别触发时间
+    bool recognitionActive;       // 识别是否正在进行中
+
     // 初始化状态
     enum InitState {
         INIT_NONE,
@@ -115,7 +120,7 @@ public:
     // 静音检测状态
     bool hasDetectedSilence() const { return vadSilenceDetected && (millis() - vadSilenceStartTime >= vadSilenceDuration); }
     uint32_t getSilenceDuration() const { return vadSilenceDetected ? (millis() - vadSilenceStartTime) : 0; }
-    void resetVadState() { vadSilenceDetected = false; vadSilenceStartTime = 0; vadLastAudioTime = millis(); }
+    void resetVadState() { vadInSpeechState = false; vadSilenceDetected = false; vadSilenceStartTime = 0; vadLastAudioTime = millis(); }
 
     // 模块访问器（用于测试和调试）
     ConfigManager* getConfigManager() { return &configManager; }

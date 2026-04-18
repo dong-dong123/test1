@@ -57,6 +57,13 @@ public:
         GZIP = 0b0001     ///< GZIP compression
     };
 
+    /// @brief Flag bit definitions
+    enum FlagBits : uint8_t {
+        FLAG_SEQUENCE_PRESENT = 0b0001,      ///< Sequence field present in header
+        FLAG_LAST_CHUNK = 0b0010,            ///< Last chunk flag for audio streaming
+        FLAG_SESSION_ID_PRESENT = 0b0100     ///< Session ID field present (V3 API)
+    };
+
     /**
      * @struct DecodedMessage
      * @brief Structure containing decoded message components
@@ -78,6 +85,7 @@ public:
         CompressionMethod compression;    ///< Compression method (4 bits)
         uint32_t sequence;                ///< Sequence number for multi-part messages
         uint32_t payloadSize;             ///< Size of payload data in bytes
+        std::vector<uint8_t> sessionId;   ///< Session ID for V3 API responses
         std::vector<uint8_t> payload;     ///< Payload data (JSON or binary)
 
         /// @brief Default constructor
@@ -134,6 +142,23 @@ public:
      *          proper JSON parsing.
      */
     static BinaryString extractTextFromResponse(const std::vector<uint8_t>& payload);
+
+    /**
+     * @brief Simple decode method based on DoubaoASR reference implementation
+     * @param data Pointer to binary message data
+     * @param length Size of binary message in bytes
+     * @param[out] messageType Output message type (0b1001 for response, 0b1111 for error)
+     * @param[out] sequence Output sequence number (0 if not present)
+     * @param[out] payload Output payload data
+     * @return true if decoding successful, false otherwise
+     *
+     * This method implements the simplified parsing logic from the reference
+     * DoubaoASR code. It expects the format:
+     * - 4-byte header (version + header size, message type + flags, serialization + compression, reserved)
+     * - 4-byte payload size (big-endian)
+     * - Payload data
+     */
+    static bool decodeSimple(const uint8_t* data, size_t length, uint8_t& messageType, uint32_t& sequence, std::vector<uint8_t>& payload);
 
 private:
     /**

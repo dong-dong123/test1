@@ -32,7 +32,7 @@ std::vector<uint8_t> BinaryProtocolEncoder::encodeFullClientRequest(
     uint32_t sequence
 ) {
     // 输入验证：检查JSON字符串是否为空
-    if (jsonRequest.empty()) {
+    if (jsonRequest.isEmpty()) {
         // 返回空向量表示错误（避免在嵌入式系统中使用异常）
         return std::vector<uint8_t>();
     }
@@ -48,14 +48,14 @@ std::vector<uint8_t> BinaryProtocolEncoder::encodeFullClientRequest(
     size_t estimatedSize = EXTENDED_HEADER_SIZE_BYTES + 4 + jsonRequest.length();
     result.reserve(estimatedSize);
 
-    // 构建header
-    uint8_t flags = (sequence > 0) ? FLAG_SEQUENCE_PRESENT : 0b0000;
+    // 构建header - 根据火山客服指导，客户端请求不包含sequence字段
+    uint8_t flags = 0b0000;  // 无序列号字段
     auto header = buildHeader(
         static_cast<uint8_t>(MessageType::FULL_CLIENT_REQUEST),
         flags,
         static_cast<uint8_t>(SerializationMethod::JSON),
         useCompression ? static_cast<uint8_t>(CompressionMethod::GZIP) : static_cast<uint8_t>(CompressionMethod::NONE),
-        sequence
+        0  // sequence字段省略，服务器自动分配
     );
 
     result.insert(result.end(), header.begin(), header.end());
@@ -66,8 +66,8 @@ std::vector<uint8_t> BinaryProtocolEncoder::encodeFullClientRequest(
 
     // 添加payload（JSON字符串）- 使用批量复制提高效率
     result.insert(result.end(),
-                  reinterpret_cast<const uint8_t*>(jsonRequest.data()),
-                  reinterpret_cast<const uint8_t*>(jsonRequest.data()) + jsonRequest.length());
+                  reinterpret_cast<const uint8_t*>(jsonRequest.c_str()),
+                  reinterpret_cast<const uint8_t*>(jsonRequest.c_str()) + jsonRequest.length());
 
     return result;
 }
@@ -96,15 +96,10 @@ std::vector<uint8_t> BinaryProtocolEncoder::encodeAudioOnlyRequest(
     size_t estimatedSize = EXTENDED_HEADER_SIZE_BYTES + 4 + length;
     result.reserve(estimatedSize);
 
-    // 设置flags：清晰明确的逻辑
+    // 设置flags：根据火山客服指导，客户端请求不包含sequence字段
     uint8_t flags = 0b0000;
-    if (sequence > 0) {
-        flags = FLAG_SEQUENCE_PRESENT;
-        if (isLastChunk) {
-            flags = FLAG_SEQUENCE_AND_LAST_CHUNK; // 有序列号且是最后一包
-        }
-    } else if (isLastChunk) {
-        flags = FLAG_LAST_CHUNK; // 无序列号但是最后一包
+    if (isLastChunk) {
+        flags = FLAG_LAST_CHUNK; // 最后一包设置LAST_CHUNK标志
     }
 
     // 构建header
@@ -113,7 +108,7 @@ std::vector<uint8_t> BinaryProtocolEncoder::encodeAudioOnlyRequest(
         flags,
         static_cast<uint8_t>(SerializationMethod::NONE), // 音频数据无需序列化
         useCompression ? static_cast<uint8_t>(CompressionMethod::GZIP) : static_cast<uint8_t>(CompressionMethod::NONE),
-        sequence
+        0  // sequence字段省略，服务器自动分配
     );
 
     result.insert(result.end(), header.begin(), header.end());
@@ -145,7 +140,12 @@ std::vector<uint8_t> BinaryProtocolEncoder::buildHeader(
     }
 
     // Byte 0: 版本(4 bits) + 头部大小(4 bits)
-    header.push_back(buildByte(PROTOCOL_VERSION, headerSize));
+    // 协议约定：头部大小字段值1表示4字节头部，2表示8字节头部（带序列号）
+    uint8_t headerSizeField = 1; // 默认4字节头部
+    if (hasSequence) {
+        headerSizeField = 2; // 8字节头部（4字节基础头部 + 4字节序列号）
+    }
+    header.push_back(buildByte(PROTOCOL_VERSION, headerSizeField));
 
     // Byte 1: 消息类型(4 bits) + flags(4 bits)
     header.push_back(buildByte(messageType & 0x0F, flags & 0x0F));
