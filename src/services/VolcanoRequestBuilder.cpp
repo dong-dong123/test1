@@ -48,8 +48,11 @@ RequestString VolcanoRequestBuilder::buildFullClientRequest(
     user["platform"] = DEFAULT_PLATFORM;
     user["sdk_version"] = DEFAULT_SDK_VERSION;
 
-    // Note: app object removed per Volcano customer service guidance
-    // Authentication is done via X-Api-* HTTP headers, not JSON fields
+    // Build app object (required for proper server processing)
+    JsonObject app = doc.createNestedObject("app");
+    app["appid"] = appid;
+    app["token"] = token;
+    app["cluster"] = cluster;
 
     // Build audio object
     JsonObject audio = doc.createNestedObject("audio");
@@ -76,10 +79,12 @@ RequestString VolcanoRequestBuilder::buildFullClientRequest(
     request["enable_nonstream"] = true;    // Required for VAD-based sentence segmentation
 
     // end_window_size: silence duration threshold for automatic stop (800ms = default)
-    request["end_window_size"] = 800;      // Auto-stop after 800ms silence (min 200)
+    // Restored to 800ms per Volcano recommendation (min 200)
+    request["end_window_size"] = 800;      // Auto-stop after 800ms silence (火山推荐值)
 
     // force_to_speech_time: minimum speech duration before allowing stop (1000ms)
-    request["force_to_speech_time"] = 1000; // Don't stop before 1 second of speech
+    // Restored to 1000ms per Volcano recommendation
+    request["force_to_speech_time"] = 1000; // Don't stop before 1 second of speech (火山推荐值)
 
     // Serialize JSON to string
     RequestString jsonString;

@@ -810,7 +810,7 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
     }
 
     // 音频累积逻辑
-    static const size_t MIN_AUDIO_DURATION = 80000;  // 2.5秒音频（16000Hz * 2字节 * 2.5秒）
+    static const size_t MIN_AUDIO_DURATION = 120000;  // 3.75秒音频（16000Hz * 2字节 * 3.75秒），增加以确保完整句子
     static const uint32_t MAX_COLLECTION_TIME = 10000; // 最多收集10秒（与录音超时一致）
 
     // 初始化音频收集开始时间（第一次收到数据时）

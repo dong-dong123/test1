@@ -12,6 +12,15 @@
 #include <algorithm>
 #include <cstring>
 
+// Debug logging
+#ifdef ARDUINO
+#include "esp_log.h"
+#define PROTOCOL_DEBUG 1
+#else
+#include <cstdio>
+#define PROTOCOL_DEBUG 1
+#endif
+
 // Protocol constants
 namespace {
     constexpr uint8_t PROTOCOL_VERSION = 0b0001;
@@ -92,14 +101,25 @@ std::vector<uint8_t> BinaryProtocolEncoder::encodeAudioOnlyRequest(
 
     std::vector<uint8_t> result;
 
+    // 协议调试日志
+#if PROTOCOL_DEBUG
+#ifdef ARDUINO
+    ESP_LOGI("BinaryProtocol", "encodeAudioOnlyRequest - length=%u, isLastChunk=%d, seq=%d, useCompression=%d",
+             length, isLastChunk, (int32_t)sequence, useCompression);
+#else
+    printf("[BinaryProtocol] encodeAudioOnlyRequest - length=%u, isLastChunk=%d, seq=%d, useCompression=%d\n",
+           length, isLastChunk, (int32_t)sequence, useCompression);
+#endif
+#endif
+
     // 预分配内存以提高效率：header + payload size + payload
     size_t estimatedSize = EXTENDED_HEADER_SIZE_BYTES + 4 + length;
     result.reserve(estimatedSize);
 
-    // 设置flags：根据火山客服指导，客户端请求不包含sequence字段
+    // 设置flags：根据火山客服指导，audio only request flags只包含LAST_CHUNK标志
     uint8_t flags = 0b0000;
     if (isLastChunk) {
-        flags = FLAG_LAST_CHUNK; // 最后一包设置LAST_CHUNK标志
+        flags |= FLAG_LAST_CHUNK; // 最后一包设置LAST_CHUNK标志（0b0010）
     }
 
     // 构建header
@@ -108,7 +128,7 @@ std::vector<uint8_t> BinaryProtocolEncoder::encodeAudioOnlyRequest(
         flags,
         static_cast<uint8_t>(SerializationMethod::NONE), // 音频数据无需序列化
         useCompression ? static_cast<uint8_t>(CompressionMethod::GZIP) : static_cast<uint8_t>(CompressionMethod::NONE),
-        0  // sequence字段省略，服务器自动分配
+        sequence  // 传递序列号（从1递增，最后一包为负数）
     );
 
     result.insert(result.end(), header.begin(), header.end());
@@ -118,6 +138,17 @@ std::vector<uint8_t> BinaryProtocolEncoder::encodeAudioOnlyRequest(
 
     // 添加payload（音频数据）- 使用安全的缓冲区复制
     result.insert(result.end(), audioData, audioData + length);
+
+    // 协议调试日志
+#if PROTOCOL_DEBUG
+#ifdef ARDUINO
+    ESP_LOGI("BinaryProtocol", "encodeAudioOnlyRequest - encoded size=%u bytes (header=%u, payload=%u)",
+             result.size(), header.size() + 4, length);
+#else
+    printf("[BinaryProtocol] encodeAudioOnlyRequest - encoded size=%u bytes (header=%u, payload=%u)\n",
+           result.size(), header.size() + 4, length);
+#endif
+#endif
 
     return result;
 }
@@ -134,16 +165,16 @@ std::vector<uint8_t> BinaryProtocolEncoder::buildHeader(
 
     // 确定头部大小：如果有序列号，使用扩展头部
     uint8_t headerSize = HEADER_SIZE_BYTES;
-    bool hasSequence = sequence > 0 && (flags & FLAG_SEQUENCE_PRESENT) != 0;
+    bool hasSequence = sequence != 0; // 根据火山客服指导，序列号字段总是存在（当sequence != 0时）
     if (hasSequence) {
         headerSize = EXTENDED_HEADER_SIZE_BYTES;
     }
 
     // Byte 0: 版本(4 bits) + 头部大小(4 bits)
-    // 协议约定：头部大小字段值1表示4字节头部，2表示8字节头部（带序列号）
-    uint8_t headerSizeField = 1; // 默认4字节头部
+    // 协议约定：头部大小字段值 = 头部总字节数 / 4
+    uint8_t headerSizeField = HEADER_SIZE_BYTES / 4; // 默认4字节头部 → 字段值1
     if (hasSequence) {
-        headerSizeField = 2; // 8字节头部（4字节基础头部 + 4字节序列号）
+        headerSizeField = EXTENDED_HEADER_SIZE_BYTES / 4; // 8字节头部 → 字段值2
     }
     header.push_back(buildByte(PROTOCOL_VERSION, headerSizeField));
 
@@ -160,6 +191,31 @@ std::vector<uint8_t> BinaryProtocolEncoder::buildHeader(
     if (hasSequence) {
         writeUint32BigEndian(header, sequence);
     }
+
+    // 协议调试日志
+#if PROTOCOL_DEBUG
+    if (messageType == static_cast<uint8_t>(MessageType::AUDIO_ONLY_REQUEST)) {
+#ifdef ARDUINO
+        ESP_LOGI("BinaryProtocol", "buildHeader - type=AUDIO_ONLY, flags=0x%02X, seq=%d, headerSize=%u, hasSequence=%d",
+                 flags, (int32_t)sequence, headerSize, hasSequence);
+        // 输出头部字节
+        char hexBuffer[100] = {0};
+        char* ptr = hexBuffer;
+        for (size_t i = 0; i < header.size() && i < 12; i++) {
+            ptr += sprintf(ptr, "%02X ", header[i]);
+        }
+        ESP_LOGI("BinaryProtocol", "Header bytes: %s", hexBuffer);
+#else
+        printf("[BinaryProtocol] buildHeader - type=AUDIO_ONLY, flags=0x%02X, seq=%d, headerSize=%u, hasSequence=%d\n",
+               flags, (int32_t)sequence, headerSize, hasSequence);
+        printf("[BinaryProtocol] Header bytes: ");
+        for (size_t i = 0; i < header.size() && i < 12; i++) {
+            printf("%02X ", header[i]);
+        }
+        printf("\n");
+#endif
+    }
+#endif
 
     return header;
 }

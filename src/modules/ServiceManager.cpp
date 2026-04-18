@@ -626,6 +626,22 @@ void ServiceManager::update() {
         performHealthCheck();
         lastHealthCheckTime = currentTime;
     }
+
+    // 更新所有语音服务（用于超时检查、状态管理等）
+    for (auto& pair : speechServices) {
+        SpeechService* service = pair.second;
+        if (service) {
+            service->update();
+        }
+    }
+
+    // 更新所有对话服务
+    for (auto& pair : dialogueServices) {
+        DialogueService* service = pair.second;
+        if (service) {
+            service->update();
+        }
+    }
 }
 
 void ServiceManager::performHealthCheck() {

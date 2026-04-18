@@ -263,6 +263,11 @@ private:
     int asyncRecognitionErrorCode;
     String asyncRecognitionErrorMessage;
 
+    // 服务器响应超时检测
+    uint32_t lastLogIdTime;           // 收到log_id的时间戳（毫秒）
+    bool awaitingTextResponse;        // 等待text响应标志
+    uint32_t responseTimeoutMs;       // 响应超时时间（默认10秒）
+
     // 异步重试状态
     RetryPolicy asyncRetryPolicy;
     uint8_t currentRetryCount;

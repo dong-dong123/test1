@@ -30,6 +30,9 @@ public:
 
     // 错误处理
     virtual String getLastError() const = 0;
+
+    // 定期更新（用于超时检查、状态更新等）
+    virtual void update() { } // 默认空实现
 };
 
 #endif

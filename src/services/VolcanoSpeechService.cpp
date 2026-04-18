@@ -228,7 +228,10 @@ VolcanoSpeechService::VolcanoSpeechService(NetworkManager *netMgr,
       currentRetryCount(0),
       nextRetryTimeMs(0),
       lastRetryableErrorCode(ERROR_NONE),
-      asyncStateMutex(nullptr)
+      asyncStateMutex(nullptr),
+      lastLogIdTime(0),
+      awaitingTextResponse(false),
+      responseTimeoutMs(5000)   // 默认5秒响应超时（服务器应在收到log_id后5秒内返回text）
 {
     // 参数验证和日志记录
     if (!networkManager)
@@ -987,7 +990,7 @@ bool VolcanoSpeechService::callWebSocketRecognitionAPI(const uint8_t *audio_data
         length,
         true,                  // isLastChunk (这是唯一的音频块)
         config.useCompression, // useCompression
-        0                      // sequence字段省略，服务器自动分配
+        static_cast<uint32_t>(static_cast<int32_t>(-1)) // 单包序列号为-1
     );
 
     if (encodedAudioRequest.empty())
@@ -2457,7 +2460,8 @@ bool VolcanoSpeechService::recognizeAsync(const uint8_t *audio_data, size_t leng
 
     // 火山建议的音频分包策略：6400字节（200ms音频）分包，递增序列号，200ms间隔
     const size_t CHUNK_SIZE = 6400;  // 火山建议的200ms音频包大小
-    uint32_t sequence = 1;           // 起始序列号（与Full Client Request保持一致）
+    uint32_t totalChunks = (length + CHUNK_SIZE - 1) / CHUNK_SIZE; // 总块数
+    uint32_t sequence = 1;           // 起始序列号（从1递增）
     size_t remaining = length;
     const uint8_t* audioPtr = audio_data;
     bool binarySendSuccessful = true;
@@ -2526,13 +2530,18 @@ bool VolcanoSpeechService::recognizeAsync(const uint8_t *audio_data, size_t leng
         size_t chunkSize = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
         bool isLastChunk = (remaining <= CHUNK_SIZE);
 
+        // 计算序列号：从1递增，最后一包为负数（火山客服指导）
+        uint32_t seqNum = isLastChunk ?
+            static_cast<uint32_t>(static_cast<int32_t>(-totalChunks)) :
+            sequence;
+
         // 编码当前音频分块
         std::vector<uint8_t> encodedChunk = BinaryProtocolEncoder::encodeAudioOnlyRequest(
             audioPtr,
             chunkSize,
             isLastChunk,             // 只有最后一包为true
             config.useCompression,
-            0                        // sequence字段省略，服务器自动分配
+            seqNum                   // 序列号（从1递增，最后一包为负数）
         );
 
         if (encodedChunk.empty())
@@ -2568,10 +2577,8 @@ bool VolcanoSpeechService::recognizeAsync(const uint8_t *audio_data, size_t leng
             break;
         }
 
-        ESP_LOGI(TAG, "Audio chunk %u sent: %zu bytes, last: %s, flags: %s",
-                 sequence, chunkSize, isLastChunk ? "yes" : "no",
-                 (isLastChunk && sequence > 0) ? "0x03(SEQUENCE+LAST)" :
-                 (isLastChunk) ? "0x02(LAST)" : "0x01(SEQUENCE)");
+        ESP_LOGI(TAG, "Audio chunk %u sent: seqNum=%d, size=%zu bytes, last: %s",
+                 sequence, static_cast<int32_t>(seqNum), chunkSize, isLastChunk ? "yes" : "no");
 
         // 更新指针和剩余大小
         audioPtr += chunkSize;
@@ -2617,7 +2624,7 @@ bool VolcanoSpeechService::recognizeAsync(const uint8_t *audio_data, size_t leng
             length,
             true,                  // isLastChunk (这是唯一的音频块)
             config.useCompression, // useCompression
-            0                      // sequence字段省略，服务器自动分配
+            static_cast<uint32_t>(static_cast<int32_t>(-1)) // 单包序列号为-1
         );
 
         if (encodedAudioRequest.empty())
@@ -2726,6 +2733,9 @@ void VolcanoSpeechService::setupAsyncRecognitionState(RecognitionCallback callba
         currentRetryCount = 0;
         nextRetryTimeMs = 0;
         lastRetryableErrorCode = ERROR_NONE;
+        // Initialize response timeout detection
+        awaitingTextResponse = false;
+        lastLogIdTime = 0;
         // Set callback if provided
         if (callback)
         {
@@ -2750,6 +2760,9 @@ void VolcanoSpeechService::setupAsyncRecognitionState(RecognitionCallback callba
         currentRetryCount = 0;
         nextRetryTimeMs = 0;
         lastRetryableErrorCode = ERROR_NONE;
+        // 在没有锁的情况下初始化响应超时检测
+        awaitingTextResponse = false;
+        lastLogIdTime = 0;
     }
 }
 
@@ -2766,6 +2779,11 @@ void VolcanoSpeechService::cleanupAsyncRecognitionState()
         asyncRecognitionErrorMessage = "";
         // Clear callback
         currentCallback = nullptr;
+
+        // 清除响应超时检测标志
+        awaitingTextResponse = false;
+        lastLogIdTime = 0;
+
         unlockAsyncState();
     }
     else
@@ -3425,6 +3443,13 @@ process_response:
         {
             ESP_LOGI(TAG, "Received intermediate confirmation (log_id only) during audio streaming, waiting for final response...");
             logEvent("async_intermediate_confirmation", "log_id=" + doc["result"]["additions"]["log_id"].as<String>());
+
+            // 设置响应超时检测标志
+            awaitingTextResponse = true;
+            lastLogIdTime = millis();
+            ESP_LOGI(TAG, "Set awaitingTextResponse=true, lastLogIdTime=%u, responseTimeout=%ums",
+                     lastLogIdTime, responseTimeoutMs);
+
             return; // 重要：直接返回，不调用回调，不清理WebSocket
         }
 
@@ -3467,6 +3492,13 @@ process_response:
         ESP_LOGI(TAG, "Async recognition successful: text='%s', reqid=%s, is_final=%s", text.c_str(), reqid.c_str(), isFinal ? "true" : "false");
         logEvent("async_recognition_success", "text=" + text + ", reqid=" + reqid + ", is_final=" + String(isFinal ? "true" : "false"));
 
+        // 清除响应超时检测标志
+        if (awaitingTextResponse) {
+            ESP_LOGI(TAG, "Clearing awaitingTextResponse flag after receiving text");
+            awaitingTextResponse = false;
+            lastLogIdTime = 0;
+        }
+
         // 调用回调
         AsyncRecognitionResult result(true, text, ERROR_NONE, "Success");
         invokeAsyncCallback(result);
@@ -3486,6 +3518,13 @@ process_response:
             errorCode = ERROR_NETWORK;
         else if (code == 1003)
             errorCode = ERROR_PROTOCOL;
+
+        // 清除响应超时检测标志
+        if (awaitingTextResponse) {
+            ESP_LOGI(TAG, "Clearing awaitingTextResponse flag due to server error");
+            awaitingTextResponse = false;
+            lastLogIdTime = 0;
+        }
 
         AsyncRecognitionResult result(false, "", errorCode, "Server error: " + message);
         invokeAsyncCallback(result);
@@ -3661,6 +3700,34 @@ void VolcanoSpeechService::checkAsyncTimeout()
     if (!getAsyncRecognitionInProgress())
     {
         return; // 没有进行中的异步识别
+    }
+
+    // 首先检查响应超时（无论当前状态如何）
+    if (awaitingTextResponse && lastLogIdTime > 0)
+    {
+        uint32_t currentTime = millis();
+        uint32_t responseElapsed = currentTime - lastLogIdTime;
+        if (responseElapsed >= responseTimeoutMs)
+        {
+            ESP_LOGW(TAG, "Response timeout after receiving log_id: elapsed=%ums, timeout=%ums, request_id=%u",
+                     responseElapsed, responseTimeoutMs, lastAsyncRequestId);
+            logEvent("response_timeout", "elapsed=" + String(responseElapsed) + "ms, timeout=" + String(responseTimeoutMs) + "ms");
+
+            // 尝试发送心跳包或重试（TODO：实现心跳机制）
+            // 暂时标记为错误，触发清理
+            awaitingTextResponse = false;
+            lastLogIdTime = 0;
+
+            // 发送服务器错误回调
+            AsyncRecognitionResult result(false, "", ERROR_SERVER,
+                                          "Server response timeout after " + String(responseElapsed) + "ms");
+            invokeAsyncCallback(result);
+
+            // 清理状态
+            cleanupAsyncRecognitionState();
+            cleanupWebSocket();
+            return;
+        }
     }
 
     // 获取当前状态

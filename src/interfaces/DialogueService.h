@@ -26,6 +26,9 @@ public:
     // 上下文管理
     virtual void clearContext() = 0;
     virtual size_t getContextSize() const = 0;
+
+    // 定期更新（用于超时检查、状态更新等）
+    virtual void update() { } // 默认空实现
 };
 
 #endif
