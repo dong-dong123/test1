@@ -910,6 +910,7 @@ void AudioDriver::recordTask(void* parameter) {
     uint32_t readCount = 0;
     uint32_t totalBytesRead = 0;
     uint32_t lastStackReport = 0;
+    static uint32_t consecutiveZeroReads = 0;  // 跟踪连续0字节读取次数
 
     // 主录音循环 - 使用原子操作和任务通知确保快速响应
     while (driver) {
@@ -1131,8 +1132,24 @@ void AudioDriver::recordTask(void* parameter) {
         } else if (err != ESP_OK) {
             ESP_LOGE(TAG, "I2S read error: %s", esp_err_to_name(err));
         } else if (bytesRead == 0) {
-            // 无数据读取（1ms超时内无数据）
-            ESP_LOGW(TAG, "Record task: i2s_read returned 0 bytes");
+            // 无数据读取（20ms超时内无数据）
+            static uint32_t consecutiveZeroReads = 0;
+            consecutiveZeroReads++;
+
+            if (consecutiveZeroReads <= 5) {
+                ESP_LOGW(TAG, "Record task: i2s_read returned 0 bytes (consecutive: %u)", consecutiveZeroReads);
+            } else if (consecutiveZeroReads <= 20) {
+                ESP_LOGW(TAG, "Record task: WARNING - %u consecutive zero-byte reads", consecutiveZeroReads);
+                // 短延迟让出CPU，避免忙等待
+                vTaskDelay(pdMS_TO_TICKS(5));
+            } else {
+                ESP_LOGE(TAG, "Record task: CRITICAL - %u consecutive zero-byte reads, potential I2S issue", consecutiveZeroReads);
+                // 重置计数器避免日志泛滥
+                consecutiveZeroReads = 15;
+                // 更长延迟
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+
             // 立即检查停止标志，确保最快响应
             portMEMORY_BARRIER();
             bool shouldContinue = driver->isRecording;
