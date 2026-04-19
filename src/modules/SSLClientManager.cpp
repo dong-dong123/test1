@@ -1,6 +1,7 @@
 #include "SSLClientManager.h"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include "../utils/MemoryUtils.h"
 
 static const char* TAG = "SSLClientManager";
 
@@ -42,6 +43,11 @@ WiFiClientSecure* SSLClientManager::getClient(const String& host, uint16_t port)
 
     // 记录内存状态
     logMemoryStatus("before getClient");
+
+    // 检查PSRAM可用性（SSL缓冲区可能使用PSRAM）
+    if (!MemoryUtils::isPSRAMAvailable()) {
+        ESP_LOGW(TAG, "PSRAM not available, SSL performance may be degraded");
+    }
 
     // 首先尝试查找可复用的客户端
     WiFiClientSecure* client = findAvailableClient(host, port);
@@ -99,6 +105,13 @@ WiFiClientSecure* SSLClientManager::getClient(const String& host, uint16_t port)
 
     if (client) {
         ESP_LOGI(TAG, "SSL client %p allocated for %s:%d", client, host.c_str(), port);
+
+        // 记录PSRAM内存状态
+        size_t freeInternal = MemoryUtils::getFreeInternal();
+        size_t freePSRAM = MemoryUtils::getFreePSRAM();
+        ESP_LOGI(TAG, "SSL client allocation memory status: Internal=%u, PSRAM=%u",
+                freeInternal, freePSRAM);
+
         logMemoryStatus("after getClient");
     }
 
@@ -163,12 +176,21 @@ void SSLClientManager::logMemoryStatus(const char* context) {
     size_t freeSPIRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     size_t minFree = esp_get_minimum_free_heap_size();
 
+    // 使用MemoryUtils获取PSRAM详细信息
+    size_t freePSRAM = MemoryUtils::getFreePSRAM();
+    size_t largestPSRAM = MemoryUtils::getLargestFreePSRAMBlock();
+    bool psramAvailable = MemoryUtils::isPSRAMAvailable();
+
     if (freeInternal < 40000) {
         ESP_LOGW(TAG, "[%s] Low internal heap: %u bytes, SPIRAM: %u bytes, Min free: %u",
                 context, freeInternal, freeSPIRAM, minFree);
+        ESP_LOGW(TAG, "[%s] PSRAM: free=%u, largest block=%u, available=%s",
+                context, freePSRAM, largestPSRAM, psramAvailable ? "YES" : "NO");
     } else {
         ESP_LOGI(TAG, "[%s] Internal heap: %u bytes, SPIRAM: %u bytes, Min free: %u",
                 context, freeInternal, freeSPIRAM, minFree);
+        ESP_LOGI(TAG, "[%s] PSRAM: free=%u, largest block=%u, available=%s",
+                context, freePSRAM, largestPSRAM, psramAvailable ? "YES" : "NO");
     }
 
     // 更新峰值内存
@@ -254,6 +276,11 @@ bool SSLClientManager::checkInternalHeap(size_t required) {
         ESP_LOGI(TAG, "Internal heap sufficient: %u available, %u required",
                 freeInternal, required);
     }
+
+    // 同时记录PSRAM状态
+    size_t freePSRAM = MemoryUtils::getFreePSRAM();
+    size_t largestPSRAM = MemoryUtils::getLargestFreePSRAMBlock();
+    ESP_LOGI(TAG, "PSRAM status: free=%u, largest block=%u", freePSRAM, largestPSRAM);
 
     return sufficient;
 }
