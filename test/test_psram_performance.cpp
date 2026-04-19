@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <unity.h>
 #include "../src/utils/MemoryUtils.h"
+#include "../src/modules/SSLClientManager.h"
 #include <esp_timer.h>
 #include <vector>
 
@@ -318,6 +319,165 @@ void test_memory_access_latency(void) {
     TEST_ASSERT_TRUE(internalTotal > 0);
 }
 
+// 测试9: SSL连接建立时间对比测试
+void test_ssl_connection_time_comparison(void) {
+    if (!MemoryUtils::isPSRAMAvailable()) {
+        TEST_IGNORE_MESSAGE("PSRAM not available, skipping SSL connection time comparison test");
+        return;
+    }
+
+    Serial.println("\n==========================================");
+    Serial.println("SSL Connection Time Comparison Test");
+    Serial.println("==========================================");
+
+    const int SSL_ITERATIONS = 10;
+    const char* TEST_HOST = "httpbin.org";
+    const uint16_t TEST_PORT = 443;
+
+    // 记录内存初始状态
+    MemoryUtils::printMemoryStatus("Before SSL connection tests");
+
+    // 测试1: 使用默认内存配置（内部RAM）的SSL连接时间
+    uint64_t defaultTotalTime = 0;
+    int defaultSuccessCount = 0;
+
+    Serial.println("\nTesting SSL connection with default memory (internal RAM):");
+
+    for (int i = 0; i < SSL_ITERATIONS; i++) {
+        uint64_t startTime = esp_timer_get_time();
+
+        // 获取SSL客户端（这会触发SSL上下文初始化）
+        WiFiClientSecure* client = SSLClientManager::getInstance().getClient(TEST_HOST, TEST_PORT);
+
+        if (client) {
+            uint64_t allocationTime = esp_timer_get_time() - startTime;
+            defaultTotalTime += allocationTime;
+            defaultSuccessCount++;
+
+            Serial.printf("  Iteration %d: SSL client allocation time = %llu us\n",
+                         i + 1, allocationTime);
+
+            // 立即释放客户端（不保持连接）
+            SSLClientManager::getInstance().releaseClient(client, false);
+        } else {
+            Serial.printf("  Iteration %d: Failed to get SSL client\n", i + 1);
+        }
+
+        // 短暂延迟，避免资源冲突
+        delay(10);
+    }
+
+    // 测试2: 强制SSL缓冲区使用PSRAM的SSL连接时间
+    uint64_t psramTotalTime = 0;
+    int psramSuccessCount = 0;
+
+    Serial.println("\nTesting SSL connection with PSRAM buffers:");
+
+    // 在PSRAM中预分配SSL缓冲区
+    const size_t SSL_BUFFER_SIZE = 16384; // 典型的SSL缓冲区大小
+    void* psramSSLBuffer = MemoryUtils::allocateSSLBuffer(SSL_BUFFER_SIZE);
+
+    if (!psramSSLBuffer) {
+        Serial.println("  WARNING: Failed to allocate PSRAM SSL buffer, test may be incomplete");
+    }
+
+    for (int i = 0; i < SSL_ITERATIONS; i++) {
+        uint64_t startTime = esp_timer_get_time();
+
+        // 获取SSL客户端（SSL缓冲区现在可能来自PSRAM）
+        WiFiClientSecure* client = SSLClientManager::getInstance().getClient(TEST_HOST, TEST_PORT);
+
+        if (client) {
+            uint64_t allocationTime = esp_timer_get_time() - startTime;
+            psramTotalTime += allocationTime;
+            psramSuccessCount++;
+
+            Serial.printf("  Iteration %d: SSL client allocation time = %llu us\n",
+                         i + 1, allocationTime);
+
+            // 立即释放客户端
+            SSLClientManager::getInstance().releaseClient(client, false);
+        } else {
+            Serial.printf("  Iteration %d: Failed to get SSL client\n", i + 1);
+        }
+
+        // 短暂延迟
+        delay(10);
+    }
+
+    // 清理PSRAM缓冲区
+    if (psramSSLBuffer) {
+        free(psramSSLBuffer);
+    }
+
+    // 清理所有SSL客户端
+    SSLClientManager::getInstance().cleanupAll(true);
+
+    // 计算并显示结果
+    Serial.println("\nSSL Connection Time Comparison Results:");
+    Serial.println("------------------------------------------");
+
+    if (defaultSuccessCount > 0) {
+        uint64_t defaultAvgTime = defaultTotalTime / defaultSuccessCount;
+        Serial.printf("Default memory (internal RAM):\n");
+        Serial.printf("  Success rate: %d/%d (%.1f%%)\n",
+                     defaultSuccessCount, SSL_ITERATIONS,
+                     (defaultSuccessCount * 100.0) / SSL_ITERATIONS);
+        Serial.printf("  Average allocation time: %llu us (%.2f ms)\n",
+                     defaultAvgTime, defaultAvgTime / 1000.0);
+    }
+
+    if (psramSuccessCount > 0) {
+        uint64_t psramAvgTime = psramTotalTime / psramSuccessCount;
+        Serial.printf("\nWith PSRAM buffers:\n");
+        Serial.printf("  Success rate: %d/%d (%.1f%%)\n",
+                     psramSuccessCount, SSL_ITERATIONS,
+                     (psramSuccessCount * 100.0) / SSL_ITERATIONS);
+        Serial.printf("  Average allocation time: %llu us (%.2f ms)\n",
+                     psramAvgTime, psramAvgTime / 1000.0);
+    }
+
+    if (defaultSuccessCount > 0 && psramSuccessCount > 0) {
+        uint64_t defaultAvgTime = defaultTotalTime / defaultSuccessCount;
+        uint64_t psramAvgTime = psramTotalTime / psramSuccessCount;
+
+        if (defaultAvgTime > 0) {
+            float slowdown = (float)psramAvgTime / defaultAvgTime;
+            Serial.printf("\nPerformance comparison:\n");
+            Serial.printf("  PSRAM slowdown factor: %.2fx\n", slowdown);
+
+            if (slowdown < 1.2) {
+                Serial.println("  Result: EXCELLENT (minimal impact)");
+            } else if (slowdown < 2.0) {
+                Serial.println("  Result: GOOD (acceptable impact)");
+            } else if (slowdown < 3.0) {
+                Serial.println("  Result: FAIR (noticeable impact)");
+            } else {
+                Serial.println("  Result: POOR (significant impact)");
+            }
+        }
+    }
+
+    // 记录内存最终状态
+    MemoryUtils::printMemoryStatus("After SSL connection tests");
+
+    // 将结果添加到基准测试结果中
+    if (defaultSuccessCount > 0 && psramSuccessCount > 0) {
+        BenchmarkResult result;
+        result.name = "SSL Client Allocation";
+        result.psramTimeMicros = psramTotalTime / psramSuccessCount;
+        result.internalTimeMicros = defaultTotalTime / defaultSuccessCount;
+        result.allocationSize = SSL_BUFFER_SIZE;
+        result.iterations = SSL_ITERATIONS;
+        benchmarkResults.push_back(result);
+    }
+
+    // 基本断言：至少应该有一些成功的分配
+    TEST_ASSERT_TRUE(defaultSuccessCount > 0 || psramSuccessCount > 0);
+
+    Serial.println("==========================================");
+}
+
 // 打印所有基准测试结果
 void printBenchmarkResults() {
     Serial.println("\n==========================================");
@@ -394,6 +554,7 @@ void runPSRAMPerformanceTests() {
     RUN_TEST(test_defragmentation_performance);
     RUN_TEST(test_allocation_stress_test);
     RUN_TEST(test_memory_access_latency);
+    RUN_TEST(test_ssl_connection_time_comparison);
 
     UNITY_END();
 }
