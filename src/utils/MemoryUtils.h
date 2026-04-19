@@ -1,0 +1,35 @@
+#ifndef MEMORY_UTILS_H
+#define MEMORY_UTILS_H
+
+#include <Arduino.h>
+#include <esp_heap_caps.h>
+
+class MemoryUtils {
+public:
+    // PSRAM分配（首选），失败时回退到内部RAM
+    static void* allocatePSRAM(size_t size, const char* tag = "");
+    static void* allocatePSRAMClear(size_t size, const char* tag = ""); // calloc版本
+
+    // 专用分配器：音频数据、网络缓冲区等
+    static void* allocateAudioBuffer(size_t size);
+    static void* allocateNetworkBuffer(size_t size);
+    static void* allocateSSLBuffer(size_t size); // SSL非敏感数据
+
+    // 内存诊断工具
+    static void printMemoryStatus(const char* tag = "");
+    static size_t getFreeInternal();
+    static size_t getFreePSRAM();
+    static size_t getLargestFreePSRAMBlock();
+
+    // 检查PSRAM可用性
+    static bool isPSRAMAvailable();
+
+    // 内存碎片整理（PSRAM）
+    static void defragmentPSRAM();
+};
+
+// 便捷宏
+#define PS_MALLOC(size) MemoryUtils::allocatePSRAM(size, __FILE__)
+#define PS_CALLOC(nmemb, size) MemoryUtils::allocatePSRAMClear(nmemb * size, __FILE__)
+
+#endif // MEMORY_UTILS_H
