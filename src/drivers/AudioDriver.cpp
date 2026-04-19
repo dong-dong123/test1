@@ -1,4 +1,5 @@
 #include "AudioDriver.h"
+#include "../utils/MemoryUtils.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_log.h>
@@ -95,7 +96,7 @@ bool AudioDriver::initialize(const AudioDriverConfig& cfg) {
              config.bufferSize, (float)config.bufferSize / (config.sampleRate * 2));
     Serial.printf("[AudioDriver] Allocating audio buffer: %zu bytes (%.1f seconds)\n",
                   config.bufferSize, (float)config.bufferSize / (config.sampleRate * 2));
-    audioBuffer = new uint8_t[config.bufferSize];
+    audioBuffer = static_cast<uint8_t*>(MemoryUtils::allocateAudioBuffer(config.bufferSize));
     if (!audioBuffer) {
         ESP_LOGE(TAG, "Failed to allocate audio buffer");
         Serial.printf("[AudioDriver] ERROR: Failed to allocate audio buffer\n");
@@ -107,7 +108,7 @@ bool AudioDriver::initialize(const AudioDriverConfig& cfg) {
 
     // 初始化I2S
     if (!initI2S()) {
-        delete[] audioBuffer;
+        heap_caps_free(audioBuffer);
         audioBuffer = nullptr;
         return false;
     }
@@ -126,7 +127,7 @@ bool AudioDriver::deinitialize() {
 
     // 释放缓冲区
     if (audioBuffer) {
-        delete[] audioBuffer;
+        heap_caps_free(audioBuffer);
         audioBuffer = nullptr;
     }
 
