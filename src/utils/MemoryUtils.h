@@ -26,6 +26,12 @@ public:
 
     // 内存碎片整理（PSRAM）
     static void defragmentPSRAM();
+
+    // 增强的内存碎片管理
+    static size_t getFragmentationScore();  // 获取碎片化评分（0-100，越高越碎片化）
+    static bool needsDefragmentation();     // 检查是否需要碎片整理
+    static void smartDefragmentPSRAM();     // 智能碎片整理（根据碎片程度调整策略）
+    static void periodicDefragmentationCheck(); // 周期性碎片检查（应在主循环中调用）
 };
 
 // 便捷宏
