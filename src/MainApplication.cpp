@@ -3,6 +3,9 @@
 #include <esp_log.h>
 #include <math.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include "utils/MemoryUtils.h"
 #include "services/VolcanoSpeechService.h"
 #include "modules/SSLClientManager.h"
 
@@ -43,6 +46,20 @@ MainApplication::~MainApplication() {
 bool MainApplication::initialize() {
     logEvent("app_start", "开始初始化");
 
+    // PSRAM可用性检查
+    if (!MemoryUtils::isPSRAMAvailable()) {
+        logEvent("psram_warning", "PSRAM not available or not configured properly");
+        ESP_LOGW(TAG, "PSRAM not available or not configured properly");
+        // 可以考虑降级策略
+    } else {
+        size_t freePSRAM = MemoryUtils::getFreePSRAM();
+        logEvent("psram_available", String("PSRAM available: ") + String(freePSRAM) + " bytes free");
+        ESP_LOGI(TAG, "PSRAM available: %u bytes free", freePSRAM);
+    }
+
+    // 打印初始内存状态
+    MemoryUtils::printMemoryStatus("System Startup");
+
     // 分阶段初始化，每个阶段失败可独立处理
     if (!initializeStage(INIT_CONFIG)) return false;
     if (!initializeStage(INIT_LOGGER)) return false;
@@ -55,6 +72,16 @@ bool MainApplication::initialize() {
     initState = INIT_COMPLETE;
     changeState(SystemState::IDLE);
     logEvent("app_ready", "应用程序初始化完成");
+
+    // 创建定期内存监控任务
+    xTaskCreate([](void* param) {
+        while (true) {
+            MemoryUtils::printMemoryStatus("Periodic Check");
+            vTaskDelay(pdMS_TO_TICKS(30000)); // 每30秒
+        }
+    }, "MemoryMonitor", 2048, nullptr, 1, nullptr);
+
+    ESP_LOGI(TAG, "Memory monitoring task created");
 
     return true;
 }
