@@ -1,6 +1,7 @@
 #include "VolcanoSpeechService.h"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include "../utils/MemoryUtils.h"
 #include <ArduinoJson.h>
 #include <time.h>
 #include <esp_system.h>
@@ -2149,6 +2150,25 @@ void VolcanoSpeechService::handleSynthesisAudio(const uint8_t *data, size_t leng
 
 void VolcanoSpeechService::handleBinaryRecognitionResponse(const std::vector<uint8_t> &payload, uint32_t sequence)
 {
+    // PSRAM内存监控 - 音频数据处理缓冲区
+    if (MemoryUtils::isPSRAMAvailable()) {
+        size_t freePSRAM = MemoryUtils::getFreePSRAM();
+        size_t largestPSRAM = MemoryUtils::getLargestFreePSRAMBlock();
+        ESP_LOGI(TAG, "PSRAM available: free=%u bytes, largest block=%u bytes", freePSRAM, largestPSRAM);
+
+        // 如果payload很大，考虑使用PSRAM缓冲区处理
+        if (payload.size() > 1024) {
+            ESP_LOGI(TAG, "Large payload detected (%u bytes), consider using PSRAM for processing", payload.size());
+            // 示例：分配PSRAM缓冲区用于音频数据处理
+            void* audioBuffer = MemoryUtils::allocateAudioBuffer(payload.size());
+            if (audioBuffer) {
+                ESP_LOGI(TAG, "Allocated PSRAM audio buffer %p for processing", audioBuffer);
+                // 注意：这里仅演示，实际需要将数据复制到缓冲区并处理
+                heap_caps_free(audioBuffer);
+            }
+        }
+    }
+
     if (payload.empty())
     {
         ESP_LOGW(TAG, "Empty payload in binary recognition response");

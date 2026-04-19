@@ -11,6 +11,7 @@
 #include "WebSocketClient.h"
 #include "../modules/NetworkManager.h"
 #include "../interfaces/ConfigManager.h"
+#include "../utils/MemoryUtils.h"
 #include <ArduinoJson.h>
 
 #ifdef ARDUINO
@@ -116,6 +117,22 @@ bool WebSocketSynthesisHandler::synthesizeViaWebSocket(
     std::vector<uint8_t>& audioData,
     const SynthesisString& endpoint
 ) {
+    // PSRAM内存监控 - WebSocket网络缓冲区
+    if (MemoryUtils::isPSRAMAvailable()) {
+        size_t freePSRAM = MemoryUtils::getFreePSRAM();
+        size_t largestPSRAM = MemoryUtils::getLargestFreePSRAMBlock();
+        ESP_LOGI(TAG, "PSRAM available: free=%u bytes, largest block=%u bytes", freePSRAM, largestPSRAM);
+
+        // 为WebSocket数据分配PSRAM缓冲区
+        const size_t bufferSize = 8192; // 8KB WebSocket缓冲区
+        void* wsBuffer = MemoryUtils::allocateNetworkBuffer(bufferSize);
+        if (wsBuffer) {
+            ESP_LOGI(TAG, "Allocated PSRAM WebSocket buffer %p (%u bytes)", wsBuffer, bufferSize);
+            // 注意：这里仅演示，实际需要将缓冲区用于WebSocket数据接收
+            heap_caps_free(wsBuffer);
+        }
+    }
+
     ESP_LOGI(TAG, "Starting WebSocket synthesis for text: %s", text.c_str());
 
     // Validate input
