@@ -1624,18 +1624,20 @@ void VolcanoSpeechService::cleanupWebSocket()
             // 关键：给TLS堆栈时间清理内存，避免SSL内存分配失败
             ESP_LOGI(TAG, "Waiting for SSL resource cleanup...");
 
-            // 记录清理前的内存状态
-            ESP_LOGI(TAG, "SSL memory before cleanup - Total: %u, Internal: %u, Min free: %u",
+            // 记录清理前的内存状态（包括SPIRAM）
+            ESP_LOGI(TAG, "SSL memory before cleanup - Total: %u, Internal: %u, SPIRAM: %u, Min free: %u",
                      esp_get_free_heap_size(),
                      esp_get_free_internal_heap_size(),
+                     heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                      esp_get_minimum_free_heap_size());
 
             delay(3000);  // 增加到3秒，确保SSL资源完全释放
 
-            // 记录清理后的内存状态
-            ESP_LOGI(TAG, "SSL memory after cleanup - Total: %u, Internal: %u, Min free: %u",
+            // 记录清理后的内存状态（包括SPIRAM）
+            ESP_LOGI(TAG, "SSL memory after cleanup - Total: %u, Internal: %u, SPIRAM: %u, Min free: %u",
                      esp_get_free_heap_size(),
                      esp_get_free_internal_heap_size(),
+                     heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                      esp_get_minimum_free_heap_size());
         }
 

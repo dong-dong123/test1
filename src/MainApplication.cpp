@@ -4,6 +4,7 @@
 #include <math.h>
 #include <WiFi.h>
 #include "services/VolcanoSpeechService.h"
+#include "modules/SSLClientManager.h"
 
 // 标签用于日志记录
 static const char* TAG = "MainApplication";
@@ -1115,10 +1116,38 @@ void MainApplication::handleAsyncRecognitionResult(const AsyncRecognitionResult&
     if (result.success) {
         logEvent("async_recognition_success", String("异步识别结果: ") + result.text);
 
-        // 优化内存使用顺序：语音识别完成后等待500ms再启动对话服务
+        // 语音识别完成后，立即清理SSL资源以释放内存
+        ESP_LOGI(TAG, "Cleaning SSL resources after recognition completion...");
+
+        // 记录当前内存状态
+        size_t beforeInternal = esp_get_free_internal_heap_size();
+        ESP_LOGI(TAG, "Internal heap before SSL cleanup: %u bytes", beforeInternal);
+
+        // 1. 先清理NetworkManager中的SSL客户端映射，避免悬垂指针
+        ESP_LOGI(TAG, "Cleaning SSL client mappings in NetworkManager...");
+        networkManager.cleanupSSLClientMappings();
+
+        // 2. 强制清理所有SSL客户端（包括活跃的）
+        SSLClientManager& sslManager = SSLClientManager::getInstance();
+        sslManager.cleanupAll(true);  // 强制清理所有SSL客户端
+
+        // 3. 清理HTTP客户端池，释放更多内存
+        ESP_LOGI(TAG, "Cleaning HTTP client pool...");
+        networkManager.cleanupHttpClients();
+
+        size_t afterInternal = esp_get_free_internal_heap_size();
+        ESP_LOGI(TAG, "Internal heap after cleanup: %u bytes (freed: %d bytes)",
+                afterInternal, afterInternal - beforeInternal);
+
+        // 优化内存使用顺序：语音识别完成后等待更长时间让系统稳定
         // 避免连续创建多个SSL连接导致内存分配失败
-        ESP_LOGI(TAG, "Waiting 500ms before starting dialogue service...");
-        delay(500);
+        if (afterInternal < 50000) {
+            ESP_LOGW(TAG, "Low memory after cleanup (%u bytes < 50KB), waiting 2 seconds...", afterInternal);
+            delay(2000);  // 内存很低时等待更久
+        } else {
+            ESP_LOGI(TAG, "Waiting 1 second before starting dialogue service...");
+            delay(1000);
+        }
 
         // 对话处理
         changeState(SystemState::THINKING);

@@ -19,10 +19,11 @@ NetworkManager::NetworkManager(ConfigManager *configMgr, Logger *log)
       logger(log),
       isInitialized(false),
       autoReconnect(true),
-      reconnectInterval(10000), // 10秒重连间隔，避免过于频繁
+      reconnectInterval(30000), // 30秒重连间隔，避免过于频繁，减少内存压力
       lastReconnectAttempt(0),
       lastStatusCheck(0),
       maxHttpClients(3),
+      sslClientManager(nullptr),
       wifiEventId(-1),
       wifiManager(nullptr),
       useWiFiManager(true)
@@ -214,6 +215,13 @@ bool NetworkManager::initialize()
         httpClients.push_back(new HTTPClient());
     }
 
+    // 初始化SSL客户端管理器（复用WiFiClientSecure减少内存分配）
+    ESP_LOGI(TAG, "Initializing SSLClientManager for SSL client reuse...");
+    sslClientManager = &SSLClientManager::getInstance();
+    ESP_LOGI(TAG, "SSLClientManager instance obtained: %p", sslClientManager);
+    sslClientManager->preallocateClients(1); // 预分配1个SSL客户端
+    ESP_LOGI(TAG, "SSLClientManager initialized and preallocated 1 client");
+
     isInitialized = true;
     ESP_LOGI(TAG, "NetworkManager initialized successfully");
 
@@ -249,6 +257,11 @@ bool NetworkManager::deinitialize()
 
     // 清理HTTP客户端
     cleanupHttpClients();
+
+    // 清理SSL客户端映射和SSL客户端管理器
+    sslClientMap.clear();
+    sslClientManager = nullptr;
+    ESP_LOGI(TAG, "SSL client mappings cleaned up");
 
     // 取消Wi-Fi事件回调
     if (wifiEventId >= 0)
@@ -734,6 +747,46 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
         return finalResponse;
     }
 
+    // HTTPS连接前的内存应急检查
+    if (config.url.startsWith("https://") && sslClientManager) {
+        size_t freeInternal = esp_get_free_internal_heap_size();
+        ESP_LOGI(TAG, "HTTPS connection memory check: internal heap = %u bytes", freeInternal);
+
+        // 早期检查：如果内存严重不足，直接拒绝请求，避免浪费资源
+        if (freeInternal < 35000) {  // 内部堆低于35KB时直接拒绝
+            ESP_LOGE(TAG, "ERROR: Internal heap critically low (%u bytes < 35KB), aborting HTTPS request immediately", freeInternal);
+            HttpResponse errorResponse;
+            errorResponse.statusCode = -1001;  // 特殊错误码，表示内存不足
+            errorResponse.errorMessage = "Insufficient memory for SSL connection";
+            return errorResponse;
+        }
+
+        if (freeInternal < 45000) {  // 内部堆低于45KB时触发应急清理
+            ESP_LOGW(TAG, "Low internal heap detected (%u bytes < 45KB), cleaning SSL clients", freeInternal);
+
+            // 强制清理所有SSL客户端（包括活跃的），这是最后手段
+            if (freeInternal < 40000) {
+                ESP_LOGE(TAG, "CRITICAL: Internal heap very low (%u bytes), forcing cleanup of ALL SSL clients", freeInternal);
+                sslClientManager->cleanupAll(true);  // 强制清理所有，包括活跃连接
+            } else {
+                // 只清理空闲客户端
+                sslClientManager->cleanupAll(false);
+            }
+
+            freeInternal = esp_get_free_internal_heap_size();
+            ESP_LOGI(TAG, "After cleanup, internal heap: %u bytes", freeInternal);
+
+            // 清理后再次检查
+            if (freeInternal < 35000) {
+                ESP_LOGE(TAG, "ERROR: Internal heap still critically low after cleanup (%u bytes < 35KB), aborting HTTPS request", freeInternal);
+                HttpResponse errorResponse;
+                errorResponse.statusCode = -1001;
+                errorResponse.errorMessage = "Insufficient memory for SSL connection after cleanup";
+                return errorResponse;
+            }
+        }
+    }
+
     // 定义可重试的错误码
     // 网络错误：负错误码（HTTPClient错误）
     // 服务器错误：5xx
@@ -770,6 +823,9 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
         return false;
     };
 
+    // SSL客户端（用于HTTPS连接的复用）
+    WiFiClientSecure* sslClient = nullptr;
+
     // 重试循环
     for (int attempt = 0; attempt < maxAttempts; attempt++)
     {
@@ -804,14 +860,33 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
         http->setReuse(config.followRedirects);
         http->setFollowRedirects(config.followRedirects ? HTTPC_FORCE_FOLLOW_REDIRECTS : HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
-        // SSL内存监控：记录连接前的内存状态
-        ESP_LOGI(TAG, "SSL memory before connection - Total heap: %u, Internal heap: %u, Min free: %u",
+        // SSL内存监控：记录连接前的内存状态（包括SPIRAM）
+        ESP_LOGI(TAG, "SSL memory before connection - Total heap: %u, Internal heap: %u, SPIRAM: %u, Min free: %u",
                  esp_get_free_heap_size(),
                  esp_get_free_internal_heap_size(),
+                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                  esp_get_minimum_free_heap_size());
 
-        // 开始连接
-        bool beginResult = http->begin(config.url);
+        // 开始连接（使用SSL客户端复用减少内存分配）
+        bool beginResult = false;
+        WiFiClientSecure* sslClient = nullptr;
+
+        if (config.url.startsWith("https://")) {
+            ESP_LOGI(TAG, "HTTPS URL detected, attempting SSL client reuse for: %s", config.url.c_str());
+            // 使用SSL客户端复用
+            sslClient = getSSLClientForUrl(config.url);
+            if (sslClient) {
+                ESP_LOGI(TAG, "SSL client reuse SUCCESS, using client: %p", sslClient);
+                beginResult = beginHttpWithSSLClient(http, config.url, sslClient);
+            } else {
+                ESP_LOGE(TAG, "ERROR: Failed to get SSL client for %s, falling back to standard begin", config.url.c_str());
+                beginResult = http->begin(config.url);
+            }
+        } else {
+            // HTTP连接，使用标准begin
+            beginResult = http->begin(config.url);
+        }
+
         if (!beginResult)
         {
             response.errorMessage = "Failed to begin HTTP connection";
@@ -819,6 +894,12 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
 
             ESP_LOGW(TAG, "HTTP begin failed on attempt %d: %s",
                      attempt + 1, response.errorMessage.c_str());
+
+            // 释放SSL客户端（如果使用了）
+            if (sslClient) {
+                sslClientManager->releaseClient(sslClient, false);
+                sslClientMap.erase(http);
+            }
 
             releaseHttpClient(http);
 
@@ -887,6 +968,8 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
                             String("Status: ") + String(httpCode) + ", Time: " + String(response.responseTime) + "ms");
                 finalResponse = response;
                 http->end();
+                // 释放SSL客户端（如果使用了）
+                releaseSSLClientForHttpClient(http);
                 releaseHttpClient(http);
                 break; // 成功，退出重试循环
             }
@@ -903,6 +986,7 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
                 if (attempt < maxAttempts - 1 && shouldRetry(httpCode, response.errorMessage))
                 {
                     http->end();
+                    releaseSSLClientForHttpClient(http);
                     releaseHttpClient(http);
 
                     // 指数退避延迟
@@ -914,6 +998,7 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
 
                 finalResponse = response;
                 http->end();
+                releaseSSLClientForHttpClient(http);
                 releaseHttpClient(http);
                 break;
             }
@@ -924,12 +1009,19 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
             response.errorMessage = http->errorToString(httpCode);
             ESP_LOGE(TAG, "HTTP request failed on attempt %d: %s",
                      attempt + 1, response.errorMessage.c_str());
+            // SSL失败后的内存状态记录（包括SPIRAM）
+            ESP_LOGI(TAG, "SSL memory after connection failure - Total heap: %u, Internal heap: %u, SPIRAM: %u, Min free: %u",
+                     esp_get_free_heap_size(),
+                     esp_get_free_internal_heap_size(),
+                     heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                     esp_get_minimum_free_heap_size());
             notifyEvent(NetworkEvent::HTTP_REQUEST_FAILED, response.errorMessage);
 
             // 检查是否应该重试
             if (attempt < maxAttempts - 1 && shouldRetry(httpCode, response.errorMessage))
             {
                 http->end();
+                releaseSSLClientForHttpClient(http);
                 releaseHttpClient(http);
 
                 // 指数退避延迟
@@ -941,6 +1033,7 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
 
             finalResponse = response;
             http->end();
+            releaseSSLClientForHttpClient(http);
             releaseHttpClient(http);
             break;
         }
@@ -1173,13 +1266,50 @@ void NetworkManager::printStatus() const
 
 HTTPClient *NetworkManager::getHttpClient()
 {
+    // 在分配HTTP客户端前检查内存状态
+    size_t freeInternal = esp_get_free_internal_heap_size();
+    ESP_LOGI(TAG, "getHttpClient: free internal heap = %u bytes", freeInternal);
+
+    if (freeInternal < 30000) {  // 内部堆低于30KB时触发紧急清理
+        ESP_LOGW(TAG, "CRITICAL: Very low internal heap (%u bytes < 30KB) before HTTP client allocation", freeInternal);
+
+        // 尝试紧急清理SSL客户端（如果SSL客户端管理器已初始化）
+        if (sslClientManager) {
+            ESP_LOGI(TAG, "Attempting emergency SSL client cleanup...");
+            size_t before = esp_get_free_internal_heap_size();
+            sslClientManager->cleanupAll(true);  // 强制清理所有SSL客户端
+            size_t after = esp_get_free_internal_heap_size();
+            ESP_LOGI(TAG, "Emergency cleanup: before=%u, after=%u, freed=%d bytes",
+                    before, after, after - before);
+        }
+
+        // 清理HTTP客户端池
+        if (!httpClients.empty()) {
+            ESP_LOGI(TAG, "Cleaning HTTP client pool (%d clients)", httpClients.size());
+            cleanupHttpClients();
+        }
+
+        freeInternal = esp_get_free_internal_heap_size();
+        ESP_LOGI(TAG, "After emergency cleanup: free internal heap = %u bytes", freeInternal);
+
+        if (freeInternal < 20000) {
+            ESP_LOGE(TAG, "ERROR: Insufficient memory for HTTP client allocation (%u bytes < 20KB)", freeInternal);
+            return nullptr;
+        }
+    }
+
     if (httpClients.empty())
     {
         // 如果池为空，创建新的客户端（不超过最大限制）
         if (httpClients.size() < maxHttpClients)
         {
-            HTTPClient *client = new HTTPClient();
+            HTTPClient *client = new (std::nothrow) HTTPClient();
+            if (!client) {
+                ESP_LOGE(TAG, "ERROR: Failed to allocate HTTPClient (out of memory)");
+                return nullptr;
+            }
             httpClients.push_back(client);
+            ESP_LOGI(TAG, "Allocated new HTTPClient %p (pool size: %d)", client, httpClients.size());
             return client;
         }
         return nullptr;
@@ -1187,6 +1317,16 @@ HTTPClient *NetworkManager::getHttpClient()
 
     HTTPClient *client = httpClients.back();
     httpClients.pop_back();
+
+    // 简单验证客户端指针（虽然有限，但可以检查是否为null）
+    if (!client) {
+        ESP_LOGE(TAG, "ERROR: Retrieved null HTTPClient from pool");
+        // 从池中移除损坏的指针并尝试获取新的
+        httpClients.clear();  // 清空池，避免更多损坏
+        return getHttpClient();  // 递归调用（但有限制）
+    }
+
+    ESP_LOGI(TAG, "Reusing HTTPClient %p from pool (remaining: %d)", client, httpClients.size());
     return client;
 }
 
@@ -1209,6 +1349,27 @@ void NetworkManager::cleanupHttpClients()
         delete client;
     }
     httpClients.clear();
+}
+
+void NetworkManager::cleanupSSLClientMappings()
+{
+    ESP_LOGI(TAG, "Cleaning up SSL client mappings (%d mappings)", sslClientMap.size());
+
+    if (!sslClientManager) {
+        ESP_LOGW(TAG, "SSLClientManager not initialized, cannot release SSL clients");
+        sslClientMap.clear();
+        return;
+    }
+
+    // 释放所有映射的SSL客户端
+    for (auto& pair : sslClientMap) {
+        WiFiClientSecure* sslClient = pair.second;
+        ESP_LOGI(TAG, "Releasing SSL client %p for HTTP client %p", sslClient, pair.first);
+        sslClientManager->releaseClient(sslClient, false);  // 不保持连接，完全释放
+    }
+
+    sslClientMap.clear();
+    ESP_LOGI(TAG, "SSL client mappings cleaned up");
 }
 
 // ============================================================================
@@ -1718,4 +1879,115 @@ bool NetworkManager::startWiFiManagerAutoConnect()
         notifyEvent(NetworkEvent::WIFI_CONNECTION_FAILED, "Auto-connect failed");
         return false;
     }
+}
+
+// ============================================================================
+// SSL客户端管理方法
+// ============================================================================
+
+WiFiClientSecure* NetworkManager::getSSLClientForUrl(const String& url) {
+    ESP_LOGI(TAG, "getSSLClientForUrl called for: %s", url.c_str());
+
+    if (!sslClientManager) {
+        ESP_LOGE(TAG, "ERROR: SSLClientManager not initialized");
+        return nullptr;
+    }
+
+    // 从URL中提取主机名和端口
+    String host;
+    uint16_t port = 443; // HTTPS默认端口
+
+    // 简单解析URL，提取主机名
+    if (url.startsWith("https://")) {
+        int hostStart = 8; // "https://".length()
+        int hostEnd = url.indexOf('/', hostStart);
+        if (hostEnd == -1) {
+            hostEnd = url.length();
+        }
+
+        String hostPort = url.substring(hostStart, hostEnd);
+        int colonPos = hostPort.indexOf(':');
+        if (colonPos != -1) {
+            host = hostPort.substring(0, colonPos);
+            port = hostPort.substring(colonPos + 1).toInt();
+        } else {
+            host = hostPort;
+        }
+    } else {
+        // 非HTTPS URL，不需要SSL客户端
+        return nullptr;
+    }
+
+    // 检查内部堆是否充足 - 提高到30000字节，更保守以避免分配失败
+    if (!sslClientManager->checkInternalHeap(30000)) {
+        ESP_LOGW(TAG, "Internal heap insufficient for SSL client to %s:%d (available < 30KB), attempting emergency cleanup", host.c_str(), port);
+
+        // 尝试紧急清理SSL客户端
+        size_t beforeInternal = esp_get_free_internal_heap_size();
+        sslClientManager->cleanupAll(true);  // 强制清理所有SSL客户端
+        size_t afterInternal = esp_get_free_internal_heap_size();
+
+        ESP_LOGI(TAG, "Emergency SSL cleanup: before=%u bytes, after=%u bytes, freed=%d bytes",
+                beforeInternal, afterInternal, afterInternal - beforeInternal);
+
+        // 再次检查内存
+        if (!sslClientManager->checkInternalHeap(30000)) {
+            ESP_LOGE(TAG, "Internal heap STILL insufficient after emergency cleanup (%u bytes < 30KB)", afterInternal);
+            return nullptr;
+        }
+
+        ESP_LOGI(TAG, "Emergency cleanup successful, memory now sufficient for SSL client");
+    }
+
+    WiFiClientSecure* sslClient = sslClientManager->getClient(host, port);
+    if (sslClient) {
+        ESP_LOGI(TAG, "Got SSL client %p for %s:%d", sslClient, host.c_str(), port);
+    } else {
+        ESP_LOGW(TAG, "Failed to get SSL client for %s:%d", host.c_str(), port);
+    }
+
+    return sslClient;
+}
+
+void NetworkManager::releaseSSLClientForHttpClient(HTTPClient* httpClient) {
+    if (!httpClient || !sslClientManager) return;
+
+    auto it = sslClientMap.find(httpClient);
+    if (it != sslClientMap.end()) {
+        WiFiClientSecure* sslClient = it->second;
+        ESP_LOGI(TAG, "Releasing SSL client %p for HTTP client %p", sslClient, httpClient);
+
+        // 释放SSL客户端（保持连接活跃以减少重连开销）
+        sslClientManager->releaseClient(sslClient, true);
+
+        // 从映射中移除
+        sslClientMap.erase(it);
+    }
+}
+
+bool NetworkManager::beginHttpWithSSLClient(HTTPClient* http, const String& url, WiFiClientSecure* sslClient) {
+    ESP_LOGI(TAG, "beginHttpWithSSLClient called: http=%p, sslClient=%p, url=%s", http, sslClient, url.c_str());
+
+    if (!http || !sslClient) {
+        ESP_LOGE(TAG, "ERROR: Invalid parameters for beginHttpWithSSLClient");
+        return false;
+    }
+
+    // 使用重载的begin方法，传入自定义的WiFiClientSecure
+    ESP_LOGI(TAG, "Calling http->begin(*sslClient, url) for SSL client reuse");
+    bool result = http->begin(*sslClient, url);
+
+    if (result) {
+        ESP_LOGI(TAG, "SUCCESS: HTTP client %p began with SSL client %p for %s", http, sslClient, url.c_str());
+
+        // 保存映射关系
+        sslClientMap[http] = sslClient;
+    } else {
+        ESP_LOGE(TAG, "ERROR: HTTP client failed to begin with SSL client for %s", url.c_str());
+
+        // 立即释放SSL客户端
+        sslClientManager->releaseClient(sslClient, false);
+    }
+
+    return result;
 }

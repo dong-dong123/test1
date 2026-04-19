@@ -10,6 +10,7 @@
 #include "../interfaces/ConfigManager.h"
 #include "../interfaces/Logger.h"
 #include "../config/ConfigData.h"
+#include "SSLClientManager.h"
 
 // 网络事件类型
 enum class NetworkEvent {
@@ -48,9 +49,9 @@ struct HttpRequestConfig {
 
     HttpRequestConfig() :
         method(HttpMethod::GET),
-        timeout(10000),
-        maxRetries(3),
-        followRedirects(true),
+        timeout(5000),           // 从10秒减少到5秒，更快失败释放内存
+        maxRetries(1),           // 从3次减少到1次，减少SSL内存分配
+        followRedirects(false),  // 禁用重定向，减少连接开销
         useSSL(true) {}
 };
 
@@ -113,6 +114,10 @@ private:
     std::vector<HTTPClient*> httpClients;
     uint8_t maxHttpClients;
 
+    // SSL客户端管理（复用WiFiClientSecure减少内存分配）
+    SSLClientManager* sslClientManager;
+    std::map<HTTPClient*, WiFiClientSecure*> sslClientMap;  // HTTPClient到SSL客户端的映射
+
     // WiFiManager智能配网
     WiFiManager* wifiManager;
     bool useWiFiManager;
@@ -125,6 +130,11 @@ private:
     void updateStatus();
     bool loadConfig();
     bool startWiFiManagerAutoConnect();
+
+    // SSL客户端管理
+    WiFiClientSecure* getSSLClientForUrl(const String& url);
+    void releaseSSLClientForHttpClient(HTTPClient* httpClient);
+    bool beginHttpWithSSLClient(HTTPClient* http, const String& url, WiFiClientSecure* sslClient);
 
     // WiFi事件ID（用于移除事件回调）
     int32_t wifiEventId;
@@ -205,11 +215,16 @@ public:
     bool checkWiFiHardware(); // 检查Wi-Fi硬件状态
     bool ensureWiFiHardwareReady(); // 确保Wi-Fi硬件就绪
 
+    // SSL客户端映射清理（用于紧急内存清理）
+    void cleanupSSLClientMappings();
+
+    // HTTP客户端池清理（用于紧急内存清理）
+    void cleanupHttpClients();
+
 private:
     // 内部HTTP客户端管理
     HTTPClient* getHttpClient();
     void releaseHttpClient(HTTPClient* client);
-    void cleanupHttpClients();
 };
 
 #endif // NETWORK_MANAGER_H
