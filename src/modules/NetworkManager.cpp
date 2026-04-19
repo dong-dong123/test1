@@ -745,19 +745,6 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
         size_t largestPSRAM = MemoryUtils::getLargestFreePSRAMBlock();
         ESP_LOGI(TAG, "PSRAM available: free=%u bytes, largest block=%u bytes", freePSRAM, largestPSRAM);
 
-        // 为HTTP响应分配PSRAM缓冲区（如果响应体可能很大）
-        const size_t bufferSize = 4096; // 4KB示例缓冲区，可根据需要调整
-        void* psramBuffer = MemoryUtils::allocateNetworkBuffer(bufferSize);
-        if (psramBuffer) {
-            ESP_LOGI(TAG, "Allocated PSRAM buffer %p (%u bytes) for network response", psramBuffer, bufferSize);
-            // 注意：在实际使用中，需要将缓冲区传递给HTTP客户端或手动管理
-            // 这里仅演示分配，实际使用时需要根据需求调整
-            heap_caps_free(psramBuffer); // 立即释放，仅演示
-        } else {
-            ESP_LOGW(TAG, "Failed to allocate PSRAM buffer for network response");
-        }
-    } else {
-        ESP_LOGW(TAG, "PSRAM not available for network buffers");
     }
     int maxAttempts = config.maxRetries + 1; // 总尝试次数 = 重试次数 + 1
 

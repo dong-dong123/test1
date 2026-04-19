@@ -108,7 +108,7 @@ bool AudioDriver::initialize(const AudioDriverConfig& cfg) {
 
     // 初始化I2S
     if (!initI2S()) {
-        heap_caps_free(audioBuffer);
+        free(audioBuffer);
         audioBuffer = nullptr;
         return false;
     }
@@ -127,7 +127,7 @@ bool AudioDriver::deinitialize() {
 
     // 释放缓冲区
     if (audioBuffer) {
-        heap_caps_free(audioBuffer);
+        free(audioBuffer);
         audioBuffer = nullptr;
     }
 
