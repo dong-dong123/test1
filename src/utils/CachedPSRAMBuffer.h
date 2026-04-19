@@ -55,7 +55,9 @@ public:
                 ESP_LOGW(TAG, "Failed to allocate cache buffer, disabling cache");
                 free(psramPtr);
                 psramPtr = nullptr;
+                bufferSize = 0;  // 确保缓冲区大小重置
                 useCache = false;
+                dirty = false;   // 确保脏标志重置
                 return;
             }
 
@@ -213,14 +215,14 @@ public:
      * @brief 获取PSRAM指针（直接访问）
      * @warning 直接访问PSRAM会绕过缓存
      */
-    void* getPSRAMPointer() {
+    void* getPSRAMPointer() const {
         return psramPtr;
     }
 
     /**
      * @brief 获取缓存指针
      */
-    void* getCachePointer() {
+    void* getCachePointer() const {
         return cacheBuffer;
     }
 
@@ -291,8 +293,5 @@ public:
         return *this;
     }
 };
-
-// 静态成员初始化
-const char* CachedPSRAMBuffer::TAG = "CachedPSRAMBuffer";
 
 #endif // CACHED_PSRAM_BUFFER_H

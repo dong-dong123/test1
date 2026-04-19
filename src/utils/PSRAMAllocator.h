@@ -58,6 +58,12 @@ public:
             return nullptr;
         }
 
+        // 检查整数溢出
+        if (n > max_size()) {
+            ESP_LOGE(TAG, "Allocation size overflow: n=%u, max_size=%u", n, max_size());
+            throw std::bad_alloc();
+        }
+
         // 计算总字节数
         size_type totalBytes = n * sizeof(T);
 

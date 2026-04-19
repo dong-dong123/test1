@@ -4,6 +4,18 @@
 
 static const char* TAG = "MemoryUtils";
 
+// 碎片整理相关常量
+namespace {
+    constexpr size_t DEFRAG_THRESHOLD_SCORE = 50;          // 碎片化评分阈值，超过此值建议整理
+    constexpr size_t DEFRAG_THRESHOLD_BLOCK_SIZE = 65536;  // 最大块大小阈值（64KB），小于此值建议整理
+    constexpr size_t LIGHT_FRAGMENTATION_MAX = 30;         // 轻度碎片化最大评分
+    constexpr size_t MEDIUM_FRAGMENTATION_MAX = 70;        // 中度碎片化最大评分
+    constexpr size_t DEFRAG_BLOCK_SIZE_MULTIPLIER = 10;    // 块大小乘数
+    constexpr size_t DEFRAG_FREE_MEMORY_RATIO = 2;         // 空闲内存比率（1/2 = 0.5）
+    constexpr size_t MIN_FREE_INTERNAL_FOR_DEFRAG = 102400; // 执行碎片整理所需的最小内部RAM空闲（100KB）
+    constexpr uint32_t PERIODIC_CHECK_INTERVAL_MS = 30000; // 周期性检查间隔（30秒）
+}
+
 void* MemoryUtils::allocatePSRAM(size_t size, const char* tag) {
     if (size == 0) return nullptr;
 
@@ -58,7 +70,7 @@ void* MemoryUtils::allocateAudioBuffer(size_t size) {
     // 音频缓冲区通常需要DMA能力，优先使用PSRAM
     void* ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ptr) {
-        ESP_LOGI(TAG, "Allocated audio buffer: %u bytes in PSRAM at %p", size, ptr);
+        ESP_LOGD(TAG, "Allocated audio buffer: %u bytes in PSRAM at %p", size, ptr);
         return ptr;
     }
 
@@ -66,7 +78,7 @@ void* MemoryUtils::allocateAudioBuffer(size_t size) {
     ESP_LOGW(TAG, "Audio buffer PSRAM allocation failed for %u bytes, using internal RAM", size);
     ptr = heap_caps_malloc(size, MALLOC_CAP_8BIT);
     if (ptr) {
-        ESP_LOGI(TAG, "Allocated audio buffer: %u bytes in internal RAM at %p", size, ptr);
+        ESP_LOGD(TAG, "Allocated audio buffer: %u bytes in internal RAM at %p", size, ptr);
     } else {
         ESP_LOGE(TAG, "Audio buffer allocation failed for %u bytes", size);
     }
@@ -79,7 +91,7 @@ void* MemoryUtils::allocateNetworkBuffer(size_t size) {
     // 网络缓冲区通常较大，优先使用PSRAM
     void* ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
     if (ptr) {
-        ESP_LOGI(TAG, "Allocated network buffer: %u bytes in PSRAM at %p", size, ptr);
+        ESP_LOGD(TAG, "Allocated network buffer: %u bytes in PSRAM at %p", size, ptr);
         return ptr;
     }
 
@@ -87,7 +99,7 @@ void* MemoryUtils::allocateNetworkBuffer(size_t size) {
     ESP_LOGW(TAG, "Network buffer PSRAM allocation failed for %u bytes, using internal RAM", size);
     ptr = malloc(size);
     if (ptr) {
-        ESP_LOGI(TAG, "Allocated network buffer: %u bytes in internal RAM at %p", size, ptr);
+        ESP_LOGD(TAG, "Allocated network buffer: %u bytes in internal RAM at %p", size, ptr);
     } else {
         ESP_LOGE(TAG, "Network buffer allocation failed for %u bytes", size);
     }
@@ -100,7 +112,7 @@ void* MemoryUtils::allocateSSLBuffer(size_t size) {
     // SSL缓冲区（非敏感数据）优先使用PSRAM
     void* ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
     if (ptr) {
-        ESP_LOGI(TAG, "Allocated SSL buffer: %u bytes in PSRAM at %p", size, ptr);
+        ESP_LOGD(TAG, "Allocated SSL buffer: %u bytes in PSRAM at %p", size, ptr);
         return ptr;
     }
 
@@ -108,7 +120,7 @@ void* MemoryUtils::allocateSSLBuffer(size_t size) {
     ESP_LOGW(TAG, "SSL buffer PSRAM allocation failed for %u bytes, using internal RAM", size);
     ptr = malloc(size);
     if (ptr) {
-        ESP_LOGI(TAG, "Allocated SSL buffer: %u bytes in internal RAM at %p", size, ptr);
+        ESP_LOGD(TAG, "Allocated SSL buffer: %u bytes in internal RAM at %p", size, ptr);
     } else {
         ESP_LOGE(TAG, "SSL buffer allocation failed for %u bytes", size);
     }
@@ -165,7 +177,7 @@ void MemoryUtils::defragmentPSRAM() {
     // 执行碎片整理（通过分配和释放内存来整理碎片）
     // 注意：这是一个简单的实现，实际效果有限
     const size_t testSize = 1024; // 1KB测试块
-    void* testBlocks[10];
+    void* testBlocks[10] = {nullptr}; // 初始化为nullptr
     size_t allocatedCount = 0;
 
     // 分配一些测试块
@@ -239,8 +251,8 @@ bool MemoryUtils::needsDefragmentation() {
     size_t fragScore = getFragmentationScore();
     size_t largestBlock = getLargestFreePSRAMBlock();
 
-    // 如果碎片化评分超过50或最大块小于64KB，建议进行碎片整理
-    bool needsDefrag = (fragScore > 50) || (largestBlock < 65536);
+    // 如果碎片化评分超过阈值或最大块小于阈值，建议进行碎片整理
+    bool needsDefrag = (fragScore > DEFRAG_THRESHOLD_SCORE) || (largestBlock < DEFRAG_THRESHOLD_BLOCK_SIZE);
 
     if (needsDefrag) {
         ESP_LOGD(TAG, "Defragmentation recommended: fragScore=%u, largestBlock=%u",
@@ -262,11 +274,11 @@ void MemoryUtils::smartDefragmentPSRAM() {
             fragScore, totalFree);
 
     // 根据碎片化程度调整策略
-    if (fragScore < 30) {
+    if (fragScore < LIGHT_FRAGMENTATION_MAX) {
         // 轻度碎片化：简单整理
         ESP_LOGI(TAG, "Light fragmentation detected, using simple defragmentation");
         defragmentPSRAM();
-    } else if (fragScore < 70) {
+    } else if (fragScore < MEDIUM_FRAGMENTATION_MAX) {
         // 中度碎片化：中等强度整理
         ESP_LOGI(TAG, "Medium fragmentation detected, using enhanced defragmentation");
 
@@ -276,7 +288,8 @@ void MemoryUtils::smartDefragmentPSRAM() {
 
         for (int sizeIdx = 0; sizeIdx < numSizes; sizeIdx++) {
             size_t blockSize = blockSizes[sizeIdx];
-            if (blockSize * 10 > totalFree * 0.5) {
+            // 检查块是否太大：如果10个块会占用超过一半的空闲内存，则跳过
+            if (blockSize * DEFRAG_BLOCK_SIZE_MULTIPLIER * 2 > totalFree) {
                 continue; // 块太大，跳过
             }
 
@@ -309,7 +322,7 @@ void MemoryUtils::smartDefragmentPSRAM() {
             defragmentPSRAM();
 
             size_t currentScore = getFragmentationScore();
-            if (currentScore < 30) {
+            if (currentScore < LIGHT_FRAGMENTATION_MAX) {
                 ESP_LOGI(TAG, "Fragmentation improved to %u after %d attempts",
                         currentScore, attempt + 1);
                 break;
@@ -329,7 +342,7 @@ void MemoryUtils::smartDefragmentPSRAM() {
 
 void MemoryUtils::periodicDefragmentationCheck() {
     static uint32_t lastCheckTime = 0;
-    static uint32_t checkInterval = 30000; // 30秒检查一次
+    static uint32_t checkInterval = PERIODIC_CHECK_INTERVAL_MS; // 30秒检查一次
 
     uint32_t currentTime = millis();
 
@@ -351,7 +364,7 @@ void MemoryUtils::periodicDefragmentationCheck() {
         // 根据系统负载决定是否立即整理
         size_t freeInternal = getFreeInternal();
 
-        if (freeInternal > 102400) { // 内部RAM有100KB以上空闲
+        if (freeInternal > MIN_FREE_INTERNAL_FOR_DEFRAG) { // 内部RAM有足够空闲
             ESP_LOGI(TAG, "System load is low, performing defragmentation now");
             smartDefragmentPSRAM();
         } else {
