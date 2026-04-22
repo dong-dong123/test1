@@ -1,6 +1,7 @@
 // src/utils/MemoryUtils.cpp
 #include "MemoryUtils.h"
 #include <esp_log.h>
+#include <string.h>
 
 static const char* TAG = "MemoryUtils";
 
@@ -139,6 +140,68 @@ void MemoryUtils::printMemoryStatus(const char* tag) {
     ESP_LOGI(TAG, "  PSRAM available: %s", isPSRAMAvailable() ? "YES" : "NO");
 }
 
+void MemoryUtils::printDetailedMemoryStatus(const char* tag) {
+    size_t freeInternal = getFreeInternal();
+    size_t totalInternal = getTotalInternal();
+    size_t usedInternal = (totalInternal > freeInternal) ? (totalInternal - freeInternal) : 0;
+    size_t largestInternal = getLargestFreeInternalBlock();
+    size_t minHeap = getMinFreeHeap();
+
+    ESP_LOGI(TAG, "========== [%s] 详细内存状态 ==========", tag ? tag : "system");
+    ESP_LOGI(TAG, "【内部SRAM】总计=%u KB, 空闲=%u KB, 已用=%u KB, 最大空闲块=%u KB",
+             totalInternal / 1024, freeInternal / 1024, usedInternal / 1024,
+             largestInternal / 1024);
+    ESP_LOGI(TAG, "【内部SRAM】历史最小空闲=%u KB (%.1f%%)",
+             minHeap / 1024,
+             totalInternal > 0 ? (minHeap * 100.0 / totalInternal) : 0);
+
+    if (isPSRAMAvailable()) {
+        size_t freePSRAM = getFreePSRAM();
+        size_t totalPSRAM = getTotalPSRAM();
+        size_t usedPSRAM = (totalPSRAM > freePSRAM) ? (totalPSRAM - freePSRAM) : 0;
+        size_t largestPSRAM = getLargestFreePSRAMBlock();
+        size_t fragScore = getFragmentationScore();
+
+        ESP_LOGI(TAG, "【PSRAM】总计=%u KB, 空闲=%u KB, 已用=%u KB, 最大空闲块=%u KB",
+                 totalPSRAM / 1024, freePSRAM / 1024, usedPSRAM / 1024,
+                 largestPSRAM / 1024);
+        ESP_LOGI(TAG, "【PSRAM】碎片评分=%u/100", fragScore);
+    } else {
+        ESP_LOGI(TAG, "【PSRAM】不可用");
+    }
+
+    ESP_LOGI(TAG, "========================================");
+}
+
+size_t MemoryUtils::getTotalInternal() {
+    return heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+}
+
+size_t MemoryUtils::getTotalPSRAM() {
+    if (!isPSRAMAvailable()) return 0;
+    return heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+}
+
+size_t MemoryUtils::getLargestFreeInternalBlock() {
+    return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+}
+
+size_t MemoryUtils::getMinFreeHeap() {
+    return esp_get_minimum_free_heap_size();
+}
+
+void MemoryUtils::logHeapUsage(const char* tag) {
+    size_t freeInternal = getFreeInternal();
+    size_t totalInternal = getTotalInternal();
+    size_t minHeap = getMinFreeHeap();
+
+    ESP_LOGI(TAG, "[%s] SRAM: 空闲=%uKB/%uKB, 最小=%uKB, 最大块=%uKB",
+             tag ? tag : "heap",
+             freeInternal / 1024, totalInternal / 1024,
+             minHeap / 1024,
+             getLargestFreeInternalBlock() / 1024);
+}
+
 size_t MemoryUtils::getFreeInternal() {
     return heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 }
@@ -159,6 +222,76 @@ size_t MemoryUtils::getLargestFreePSRAMBlock() {
 
 bool MemoryUtils::isPSRAMAvailable() {
     return heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0;
+}
+
+bool MemoryUtils::verifyPSRAMAllocation(size_t testSize) {
+    if (!isPSRAMAvailable()) {
+        ESP_LOGI(TAG, "PSRAM验证: 不可用 (isPSRAMAvailable返回false)");
+        return false;
+    }
+
+    // 尝试分配一个小块来验证PSRAM实际可用性
+    void* testBlock = heap_caps_malloc(testSize, MALLOC_CAP_SPIRAM);
+    if (!testBlock) {
+        ESP_LOGW(TAG, "PSRAM验证: 分配 %u 字节失败 (PSRAM可能存在但配置有问题)", testSize);
+        return false;
+    }
+
+    // 写入测试数据
+    memset(testBlock, 0xAA, testSize);
+
+    // 读取验证
+    uint8_t* data = (uint8_t*)testBlock;
+    bool verificationPassed = true;
+    for (size_t i = 0; i < testSize; i++) {
+        if (data[i] != 0xAA) {
+            verificationPassed = false;
+            break;
+        }
+    }
+
+    // 释放测试块
+    free(testBlock);
+
+    if (verificationPassed) {
+        ESP_LOGI(TAG, "PSRAM验证: 通过 (成功分配、写入和读取 %u 字节)", testSize);
+        return true;
+    } else {
+        ESP_LOGW(TAG, "PSRAM验证: 失败 (数据完整性检查未通过)");
+        return false;
+    }
+}
+
+void MemoryUtils::printPSRAMStatus(const char* tag) {
+    ESP_LOGI(TAG, "========== [%s] PSRAM详细状态 ==========", tag ? tag : "PSRAM");
+
+    bool available = isPSRAMAvailable();
+    ESP_LOGI(TAG, "PSRAM可用性: %s", available ? "是" : "否");
+
+    if (available) {
+        size_t total = getTotalPSRAM();
+        size_t free = getFreePSRAM();
+        size_t largest = getLargestFreePSRAMBlock();
+        size_t used = (total > free) ? (total - free) : 0;
+
+        ESP_LOGI(TAG, "总计: %u 字节 (%.1f MB)", total, total / (1024.0 * 1024.0));
+        ESP_LOGI(TAG, "已用: %u 字节 (%.1f MB)", used, used / (1024.0 * 1024.0));
+        ESP_LOGI(TAG, "空闲: %u 字节 (%.1f MB)", free, free / (1024.0 * 1024.0));
+        ESP_LOGI(TAG, "最大空闲块: %u 字节 (%.1f KB)", largest, largest / 1024.0);
+        ESP_LOGI(TAG, "使用率: %.1f%%", total > 0 ? (used * 100.0 / total) : 0.0);
+
+        // 验证分配能力
+        bool canAllocate = verifyPSRAMAllocation(1024);
+        ESP_LOGI(TAG, "分配验证: %s", canAllocate ? "通过" : "失败");
+    } else {
+        ESP_LOGI(TAG, "PSRAM未检测到或未正确配置");
+        ESP_LOGI(TAG, "提示: 检查ESP32-S3的PSRAM配置:");
+        ESP_LOGI(TAG, "  1. 确保硬件连接正确");
+        ESP_LOGI(TAG, "  2. 检查platformio.ini中的PSRAM设置");
+        ESP_LOGI(TAG, "  3. 确认板卡支持PSRAM");
+    }
+
+    ESP_LOGI(TAG, "==========================================");
 }
 
 void MemoryUtils::defragmentPSRAM() {

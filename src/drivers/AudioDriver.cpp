@@ -225,11 +225,11 @@ bool AudioDriver::startRecord(AudioDataCallback callback, void* userData) {
     // 先设置录音标志，确保任务启动时能看到正确的状态
     isRecording = true;
 
-    // 启动录音任务 - 增加堆栈大小以解决溢出问题
+    // 启动录音任务 - 优化堆栈大小以节省内存
     BaseType_t taskCreateResult = xTaskCreate(
         recordTask,
         "AudioRecord",
-        16384,  // 堆栈大小减小到16384（16KB）以解决内存不足问题
+        12288,  // 堆栈大小优化为12288（12KB），节省4KB内存
         this,
         1,      // 优先级
         const_cast<TaskHandle_t*>(&recordTaskHandle)

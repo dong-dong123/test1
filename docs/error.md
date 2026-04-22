@@ -1374,3 +1374,249 @@ if (currentState == STATE_WAITING_RESPONSE && millis() - lastHeartbeat > 10000) 
 1. 实施方案B（心跳机制）以保持WebSocket连接活跃
 2. 监控服务器实际响应时间，优化超时设置
 3. 考虑添加进度反馈，改善用户体验
+
+# 内存优化与SRAM监控增强总结（2026-04-22）
+
+## 📊 **问题描述**
+
+基于2026-04-22测试日志，系统在语音识别完成后进行对话时出现内存不足错误：
+- ❌ **内部堆严重不足**: `Internal heap critically low (30336 bytes < 35KB), aborting HTTPS request immediately`
+- ❌ **SSL连接失败**: 内存不足导致Coze API和Volcano合成API请求失败
+- ❌ **系统状态**: 识别成功(`小智，今天天气怎么样？`)但对话和合成因内存不足失败
+
+## 🔍 **根本原因分析**
+
+### **1. 主要SRAM消费者分析**
+| 组件 | 内存位置 | 大小 | 是否优化 |
+|------|----------|------|----------|
+| **MainApplication::audioBuffer** | 内部SRAM静态数组 | **160 KB** | ✅ **已优化** |
+| AudioDriver::audioBuffer | PSRAM优先 | 64-160 KB | 已使用PSRAM |
+| 录音任务栈 | 内部SRAM | 16 KB | ✅ **已优化** |
+| HTTP客户端池 | 内部堆 | 24-48 KB | ✅ **已优化** |
+| SSL客户端 | 内部堆 | 60-120 KB | ✅ **已优化** |
+
+### **2. 关键问题**
+- **audioBuffer[160000]** 是静态数组，占用160KB内部SRAM（约30%总SRAM）
+- SSL客户端每个占用30-60KB内部SRAM，最多2个
+- HTTP客户端池最多3个，每个8-16KB
+- 录音任务栈16KB过大
+
+## 🛠️ **优化方案实施**
+
+### **✅ 已实施的优化**
+
+#### **1. audioBuffer从SRAM静态数组改为PSRAM动态分配**
+- **文件**: [src/MainApplication.h](src/MainApplication.h#L53), [src/MainApplication.cpp](src/MainApplication.cpp#L40)
+- **修改前**: `uint8_t audioBuffer[MAIN_AUDIO_BUFFER_SIZE];` (160KB静态SRAM)
+- **修改后**: `uint8_t* audioBuffer;` (PSRAM优先动态分配)
+- **分配策略**: 优先PSRAM，失败时回退到内部SRAM
+- **内存节省**: **160KB内部SRAM** → 0KB（如果PSRAM可用）
+
+#### **2. 增强内存监控系统**
+- **文件**: [src/utils/MemoryUtils.h](src/utils/MemoryUtils.h), [src/utils/MemoryUtils.cpp](src/utils/MemoryUtils.cpp)
+- **新增函数**:
+  - `printDetailedMemoryStatus()` - 详细内存状态报告
+  - `getTotalInternal()` - 总内部SRAM
+  - `getTotalPSRAM()` - 总PSRAM  
+  - `getLargestFreeInternalBlock()` - 内部SRAM最大空闲块
+  - `getMinFreeHeap()` - 历史最小空闲堆
+  - `logHeapUsage()` - 堆使用概览
+
+#### **3. 在关键状态转换点添加内存监控**
+- **文件**: [src/MainApplication.cpp](src/MainApplication.cpp)
+- **监控点**:
+  - `changeState()` - 所有状态转换时记录内存
+  - `startListening()` - 开始录音前
+  - `handleState()` RECOGNIZING - 开始识别前
+  - `handleAsyncRecognitionResult()` - 开始对话前
+  - `playResponse()` - 开始合成前
+
+#### **4. 减少录音任务栈大小**
+- **文件**: [src/drivers/AudioDriver.cpp](src/drivers/AudioDriver.cpp#L232)
+- **修改前**: `16384` (16KB)
+- **修改后**: `12288` (12KB)
+- **内存节省**: **4KB内部SRAM**
+
+#### **5. 减少HTTP客户端池大小**
+- **文件**: [src/modules/NetworkManager.cpp](src/modules/NetworkManager.cpp#L26)
+- **修改前**: `maxHttpClients(3)`
+- **修改后**: `maxHttpClients(2)`
+- **内存节省**: **8-16KB内部SRAM** (减少1个HTTPClient)
+
+#### **6. 减少SSL客户端最大数量**
+- **文件**: [src/modules/SSLClientManager.cpp](src/modules/SSLClientManager.cpp#L9)
+- **修改前**: `maxClients(2)`
+- **修改后**: `maxClients(1)`
+- **内存节省**: **30-60KB内部SRAM** (减少1个SSL客户端)
+
+## 📈 **预期效果**
+
+### **内存节省估算**
+| 优化项 | 节省内部SRAM | 说明 |
+|--------|--------------|------|
+| audioBuffer移到PSRAM | 160 KB | 最大单一节省 |
+| 录音任务栈减少 | 4 KB | 从16KB→12KB |
+| HTTP客户端池减少 | 8-16 KB | 从3个→2个 |
+| SSL客户端减少 | 30-60 KB | 从2个→1个 |
+| **总计** | **202-240 KB** | **约40-47%总SRAM** |
+
+### **系统行为改进**
+1. **避免内存不足错误**: 内部SRAM空闲从<35KB提升到>100KB
+2. **SSL连接成功**: 有足够内存进行HTTPS请求
+3. **完整流程**: 识别→对话→合成流程可完整执行
+4. **实时监控**: 关键状态转换时记录内存，便于调试
+
+## 🔧 **代码修改详情**
+
+### **1. MemoryUtils增强**
+```cpp
+// 新增函数
+void printDetailedMemoryStatus(const char* tag = "");
+size_t getTotalInternal();
+size_t getTotalPSRAM();
+size_t getLargestFreeInternalBlock();
+size_t getMinFreeHeap();
+void logHeapUsage(const char* tag = "");
+```
+
+### **2. audioBuffer动态分配**
+```cpp
+// 构造函数中
+if (MemoryUtils::isPSRAMAvailable()) {
+    audioBuffer = (uint8_t*)heap_caps_calloc(1, MAIN_AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+    audioBufferInPSRAM = true;
+} else {
+    audioBuffer = (uint8_t*)calloc(1, MAIN_AUDIO_BUFFER_SIZE);
+    audioBufferInPSRAM = false;
+}
+
+// 析构函数中
+if (audioBuffer) {
+    free(audioBuffer);
+    audioBuffer = nullptr;
+}
+```
+
+### **3. 状态转换内存监控**
+```cpp
+// 在changeState()中
+if (newState == SystemState::LISTENING || newState == SystemState::RECOGNIZING ||
+    newState == SystemState::THINKING || newState == SystemState::SYNTHESIZING ||
+    newState == SystemState::PLAYING) {
+    MemoryUtils::logHeapUsage(stateToString(newState).c_str());
+}
+```
+
+## 📋 **验证计划**
+
+### **测试场景**
+1. **PSRAM可用场景**: audioBuffer分配在PSRAM，验证160KB SRAM节省
+2. **PSRAM不可用场景**: audioBuffer回退到内部SRAM，验证系统降级能力
+3. **完整流程测试**: 录音→识别→对话→合成，验证无内存不足错误
+4. **压力测试**: 连续多次语音交互，验证内存稳定性
+
+### **监控指标**
+- 内部SRAM空闲: 应始终>50KB（NetworkManager阈值）
+- PSRAM使用: audioBuffer应在PSRAM中（如果可用）
+- 最小空闲堆: 历史最低值应>30KB
+- SSL连接成功率: 应接近100%
+
+## 🚀 **下一步建议**
+
+### **短期优化**
+1. **进一步减少任务栈**: 分析录音任务实际栈使用，可能进一步减少到8KB
+2. **DynamicJsonDocument优化**: 减少JSON文档大小，使用栈分配替代堆分配
+3. **网络缓冲区优化**: 使用PSRAM分配网络缓冲区
+
+### **长期架构**
+1. **内存池管理**: 实现统一的内存池，减少碎片
+2. **按需加载**: 服务模块按需初始化，减少常驻内存
+3. **内存压缩**: 对音频数据进行压缩存储
+4. **预测性清理**: 基于状态预测内存需求，提前清理
+
+### **监控增强**
+1. **实时内存仪表盘**: 在显示屏上显示内存使用
+2. **预警系统**: 内存低于阈值时提前预警
+3. **自动化测试**: 内存压力自动化测试套件
+
+## 📝 **总结**
+
+本次内存优化解决了系统最严重的内存瓶颈，通过将最大的SRAM消费者(audioBuffer)移到PSRAM，并减少其他组件的内存占用，预计可释放200-240KB内部SRAM，使系统能够稳定完成完整的语音交互流程。增强的内存监控系统将帮助未来快速诊断内存相关问题。
+
+## 🔍 **PSRAM检查增强（2026-04-22补充）**
+
+### **问题**
+用户指出需要更可靠的PSRAM可用性检查，因为简单的`heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0`检查可能不够充分。
+
+### **解决方案**
+添加了更详细的PSRAM检查和验证机制：
+
+#### **1. 新增MemoryUtils函数**
+```cpp
+// 验证PSRAM实际分配能力（分配、写入、读取测试）
+static bool verifyPSRAMAllocation(size_t testSize = 1024);
+
+// 打印PSRAM详细状态
+static void printPSRAMStatus(const char* tag = "");
+```
+
+#### **2. 增强的PSRAM检查流程**
+1. **基础检查**: `isPSRAMAvailable()` - 检查PSRAM是否有空闲内存
+2. **分配验证**: `verifyPSRAMAllocation()` - 实际分配测试块验证读写能力
+3. **详细状态**: `printPSRAMStatus()` - 打印PSRAM总量、使用量、最大块等信息
+
+#### **3. MainApplication中的改进**
+- **构造函数**: 先验证PSRAM，再尝试分配大块内存
+- **初始化**: 系统启动时打印详细的PSRAM状态
+- **日志增强**: 明确记录audioBuffer最终分配位置（PSRAM或内部SRAM）
+
+#### **4. 验证测试块**
+```cpp
+// 分配测试块
+void* testBlock = heap_caps_malloc(testSize, MALLOC_CAP_SPIRAM);
+// 写入测试数据 (0xAA)
+memset(testBlock, 0xAA, testSize);
+// 读取验证
+for (size_t i = 0; i < testSize; i++) {
+    if (data[i] != 0xAA) {
+        verificationPassed = false;
+        break;
+    }
+}
+// 释放测试块
+free(testBlock);
+```
+
+### **预期效果**
+1. **更可靠的PSRAM检测**: 不仅检查存在性，还验证实际可用性
+2. **详细的调试信息**: 系统启动时显示PSRAM总量、使用率、最大块等信息
+3. **明确的分配结果**: 日志中清晰显示audioBuffer最终分配在哪里
+4. **降级处理**: PSRAM不可用时自动回退到内部SRAM
+
+### **日志输出示例**
+```
+[MainApplication] PSRAM详细状态:
+[MainApplication] PSRAM可用性: 是
+[MainApplication] 总计: 8388608 字节 (8.0 MB)
+[MainApplication] 已用: 163840 字节 (0.2 MB)
+[MainApplication] 空闲: 8224768 字节 (7.8 MB)
+[MainApplication] 最大空闲块: 8224768 字节 (8032.0 KB)
+[MainApplication] 使用率: 2.0%
+[MainApplication] 分配验证: 通过
+[MainApplication] ✅ 音频缓冲区 160000 字节成功分配在PSRAM
+```
+
+### **配置检查提示**
+如果PSRAM不可用，日志会提示：
+```
+[MainApplication] PSRAM未检测到或未正确配置
+[MainApplication] 提示: 检查ESP32-S3的PSRAM配置:
+[MainApplication]   1. 确保硬件连接正确
+[MainApplication]   2. 检查platformio.ini中的PSRAM设置
+[MainApplication]   3. 确认板卡支持PSRAM
+```
+
+### **代码位置**
+- **新增函数**: [src/utils/MemoryUtils.cpp](src/utils/MemoryUtils.cpp#L226)
+- **构造函数增强**: [src/MainApplication.cpp](src/MainApplication.cpp#L40)
+- **初始化增强**: [src/MainApplication.cpp](src/MainApplication.cpp#L79)

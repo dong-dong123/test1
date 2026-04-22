@@ -19,6 +19,8 @@ MainApplication::MainApplication()
       lastErrorMessage(""),
       audioHardwareAvailable(false),
       initState(INIT_NONE),
+      audioBuffer(nullptr),
+      audioBufferInPSRAM(false),
       audioBufferPos(0),
       audioCollectionStartTime(0),
       vadSpeechThreshold(0.50f),  // 默认语音检测阈值0.50
@@ -33,32 +35,92 @@ MainApplication::MainApplication()
       recognitionActive(false) {
     // 初始化时间戳
     stateEntryTime = millis();
-    // 清零音频缓冲区
-    memset(audioBuffer, 0, MAIN_AUDIO_BUFFER_SIZE);
+
+    // 动态分配音频缓冲区（PSRAM优先）
+    // 详细检查PSRAM可用性
+    bool psramAvailable = MemoryUtils::isPSRAMAvailable();
+    bool psramVerified = false;
+
+    if (psramAvailable) {
+        // 验证PSRAM实际分配能力
+        psramVerified = MemoryUtils::verifyPSRAMAllocation(1024);
+
+        if (psramVerified) {
+            ESP_LOGI(TAG, "PSRAM可用且验证通过，尝试分配音频缓冲区 %u 字节", MAIN_AUDIO_BUFFER_SIZE);
+            audioBuffer = (uint8_t*)heap_caps_calloc(1, MAIN_AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+            if (audioBuffer) {
+                audioBufferInPSRAM = true;
+                ESP_LOGI(TAG, "✅ 音频缓冲区 %u 字节成功分配在PSRAM", MAIN_AUDIO_BUFFER_SIZE);
+            } else {
+                ESP_LOGW(TAG, "⚠️ PSRAM验证通过但分配失败，可能PSRAM空间不足");
+                psramVerified = false;
+            }
+        } else {
+            ESP_LOGW(TAG, "⚠️ PSRAM检测到但验证失败，可能配置有问题");
+        }
+    } else {
+        ESP_LOGW(TAG, "⚠️ PSRAM不可用");
+    }
+
+    // PSRAM分配失败或不可用，回退到内部RAM
+    if (!audioBuffer) {
+        ESP_LOGI(TAG, "回退到内部SRAM分配音频缓冲区 %u 字节", MAIN_AUDIO_BUFFER_SIZE);
+        audioBuffer = (uint8_t*)calloc(1, MAIN_AUDIO_BUFFER_SIZE);
+        if (audioBuffer) {
+            audioBufferInPSRAM = false;
+            ESP_LOGI(TAG, "✅ 音频缓冲区 %u 字节分配在内部SRAM", MAIN_AUDIO_BUFFER_SIZE);
+        } else {
+            ESP_LOGE(TAG, "❌ 严重错误: 无法分配音频缓冲区 %u 字节!", MAIN_AUDIO_BUFFER_SIZE);
+        }
+    }
+
+    // 打印详细内存分配状态
+    ESP_LOGI(TAG, "音频缓冲区分配总结:");
+    ESP_LOGI(TAG, "  - PSRAM检测: %s", psramAvailable ? "是" : "否");
+    ESP_LOGI(TAG, "  - PSRAM验证: %s", psramVerified ? "通过" : "失败");
+    ESP_LOGI(TAG, "  - 缓冲区位置: %s", audioBufferInPSRAM ? "PSRAM" : "内部SRAM");
+    ESP_LOGI(TAG, "  - 缓冲区大小: %u 字节 (%.1f KB)", MAIN_AUDIO_BUFFER_SIZE, MAIN_AUDIO_BUFFER_SIZE / 1024.0);
+
+    MemoryUtils::printDetailedMemoryStatus("Constructor");
 }
 
 // 析构函数
 MainApplication::~MainApplication() {
     deinitialize();
+
+    // 释放音频缓冲区
+    if (audioBuffer) {
+        free(audioBuffer);
+        audioBuffer = nullptr;
+        ESP_LOGI(TAG, "音频缓冲区已释放");
+    }
 }
 
 // 初始化应用程序
 bool MainApplication::initialize() {
     logEvent("app_start", "开始初始化");
 
-    // PSRAM可用性检查
-    if (!MemoryUtils::isPSRAMAvailable()) {
-        logEvent("psram_warning", "PSRAM not available or not configured properly");
-        ESP_LOGW(TAG, "PSRAM not available or not configured properly");
+    // PSRAM详细状态检查
+    MemoryUtils::printPSRAMStatus("System Startup");
+
+    bool psramAvailable = MemoryUtils::isPSRAMAvailable();
+    bool psramVerified = MemoryUtils::verifyPSRAMAllocation(1024);
+
+    if (!psramAvailable) {
+        logEvent("psram_warning", "PSRAM不可用或未配置");
+        ESP_LOGW(TAG, "PSRAM不可用或未配置");
         // 可以考虑降级策略
+    } else if (!psramVerified) {
+        logEvent("psram_warning", "PSRAM检测到但验证失败");
+        ESP_LOGW(TAG, "PSRAM检测到但验证失败，可能配置有问题");
     } else {
         size_t freePSRAM = MemoryUtils::getFreePSRAM();
-        logEvent("psram_available", String("PSRAM available: ") + String(freePSRAM) + " bytes free");
-        ESP_LOGI(TAG, "PSRAM available: %u bytes free", freePSRAM);
+        logEvent("psram_available", String("PSRAM可用: ") + String(freePSRAM) + " 字节空闲");
+        ESP_LOGI(TAG, "PSRAM可用: %u 字节空闲", freePSRAM);
     }
 
     // 打印初始内存状态
-    MemoryUtils::printMemoryStatus("System Startup");
+    MemoryUtils::printDetailedMemoryStatus("System Startup");
 
     // 分阶段初始化，每个阶段失败可独立处理
     if (!initializeStage(INIT_CONFIG)) return false;
@@ -465,6 +527,13 @@ void MainApplication::changeState(SystemState newState) {
              String("从 ") + stateToString(oldState) +
              " 到 " + stateToString(newState));
 
+    // 在关键状态转换时记录内存使用情况
+    if (newState == SystemState::LISTENING || newState == SystemState::RECOGNIZING ||
+        newState == SystemState::THINKING || newState == SystemState::SYNTHESIZING ||
+        newState == SystemState::PLAYING) {
+        MemoryUtils::logHeapUsage(stateToString(newState).c_str());
+    }
+
     // 基于旧状态的清理逻辑
     if (oldState == SystemState::LISTENING) {
         // 从录音状态转换出去时，停止录音
@@ -513,6 +582,8 @@ void MainApplication::handleState() {
             if (!recognitionActive) {
                 recognitionActive = true;
                 recognitionStartTime = millis();
+                // 开始识别前记录内存状态
+                MemoryUtils::logHeapUsage("Before Recognition");
                 Serial.printf("[RECOGNITION] Starting recognition process, audio buffer size: %zu bytes\n", audioBufferPos);
 
                 // 录音可能在进入RECOGNIZING状态时已被stopRecord()停止，这是正常的
@@ -782,11 +853,19 @@ void MainApplication::startListening() {
     }
 
     if (currentState == SystemState::IDLE && audioDriver.isReady()) {
+        // 开始录音前记录内存状态
+        MemoryUtils::logHeapUsage("Before Listening");
         changeState(SystemState::LISTENING);
 
         // 重置音频累积缓冲区
         audioBufferPos = 0;
-        memset(audioBuffer, 0, MAIN_AUDIO_BUFFER_SIZE);
+        if (audioBuffer) {
+            memset(audioBuffer, 0, MAIN_AUDIO_BUFFER_SIZE);
+        } else {
+            ESP_LOGE(TAG, "严重错误: audioBuffer为null!");
+            handleError("音频缓冲区未初始化");
+            return;
+        }
 
         // 开始录音，设置回调函数
         bool recordStarted = audioDriver.startRecord([](const uint8_t* data, size_t len, void* user) {
@@ -834,6 +913,12 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
     // 快速检查录音是否仍在进行（防止在stopRecord期间执行长时间操作）
     if (!audioDriver.isRecordingActive()) {
         Serial.printf("[DEBUG] processAudioData: Recording not active, skipping (state=%d)\n", currentState);
+        return;
+    }
+
+    // 检查音频缓冲区是否已分配
+    if (!audioBuffer) {
+        ESP_LOGE(TAG, "严重错误: audioBuffer为null，无法处理音频数据!");
         return;
     }
 
@@ -1083,6 +1168,8 @@ void MainApplication::playResponse(const String& text) {
     ESP_LOGI(TAG, "Waiting 500ms before starting speech synthesis...");
     delay(500);
 
+    // 开始语音合成前记录内存状态
+    MemoryUtils::logHeapUsage("Before Synthesis");
     changeState(SystemState::SYNTHESIZING);
     logEvent("synthesis_start", String("开始合成: ") + text);
 
@@ -1177,6 +1264,8 @@ void MainApplication::handleAsyncRecognitionResult(const AsyncRecognitionResult&
         }
 
         // 对话处理
+        // 开始对话前记录内存状态
+        MemoryUtils::logHeapUsage("Before Thinking");
         changeState(SystemState::THINKING);
 
         DialogueService* dialogue = serviceManager.getDefaultDialogueService();

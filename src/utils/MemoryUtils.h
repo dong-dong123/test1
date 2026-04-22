@@ -17,12 +17,20 @@ public:
 
     // 内存诊断工具
     static void printMemoryStatus(const char* tag = "");
+    static void printDetailedMemoryStatus(const char* tag = "");  // 增强版内存状态
     static size_t getFreeInternal();
     static size_t getFreePSRAM();
+    static size_t getTotalInternal();          // 总内部SRAM
+    static size_t getTotalPSRAM();             // 总PSRAM
+    static size_t getLargestFreeInternalBlock(); // 内部SRAM最大空闲块
     static size_t getLargestFreePSRAMBlock();
+    static size_t getMinFreeHeap();            // 历史最小空闲堆
+    static void logHeapUsage(const char* tag = ""); // 打印堆使用概览
 
     // 检查PSRAM可用性
     static bool isPSRAMAvailable();
+    static bool verifyPSRAMAllocation(size_t testSize = 1024);  // 验证PSRAM分配能力
+    static void printPSRAMStatus(const char* tag = "");         // 打印PSRAM详细状态
 
     // 内存碎片整理（PSRAM）
     static void defragmentPSRAM();

@@ -23,7 +23,7 @@ NetworkManager::NetworkManager(ConfigManager *configMgr, Logger *log)
       reconnectInterval(30000), // 30秒重连间隔，避免过于频繁，减少内存压力
       lastReconnectAttempt(0),
       lastStatusCheck(0),
-      maxHttpClients(3),
+      maxHttpClients(2),  // 减少HTTP客户端池大小以节省内存（从3减少到2）
       sslClientManager(nullptr),
       wifiEventId(-1),
       wifiManager(nullptr),

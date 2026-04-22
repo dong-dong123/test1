@@ -49,8 +49,10 @@ private:
     bool audioHardwareAvailable;
 
     // 音频累积
+    // 注意: audioBuffer使用PSRAM优先的动态分配，避免占用160KB内部SRAM
     static const size_t MAIN_AUDIO_BUFFER_SIZE = 160000;  // 5秒音频（16000Hz * 2字节 * 5秒）
-    uint8_t audioBuffer[MAIN_AUDIO_BUFFER_SIZE];
+    uint8_t* audioBuffer;          // PSRAM优先的动态分配
+    bool audioBufferInPSRAM;       // 标记audioBuffer是否在PSRAM中
     size_t audioBufferPos;
     uint32_t audioCollectionStartTime;
 

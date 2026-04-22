@@ -6,7 +6,7 @@
 static const char* TAG = "SSLClientManager";
 
 SSLClientManager::SSLClientManager()
-    : maxClients(2)  // 最大2个客户端，避免内存占用过多
+    : maxClients(1)  // 最大1个客户端，大幅减少内存占用（从2减少到1）
     , peakInternalMemory(0)
     , connectionFailures(0)
     , reuseCount(0) {
