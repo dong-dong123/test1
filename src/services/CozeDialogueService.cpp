@@ -1,6 +1,7 @@
 #include "CozeDialogueService.h"
 #include <esp_log.h>
 #include <ArduinoJson.h>
+#include "../utils/MemoryUtils.h"
 
 static const char* TAG = "CozeDialogueService";
 
@@ -354,24 +355,14 @@ bool CozeDialogueService::updateAvailability() {
 // ============================================================================
 
 bool CozeDialogueService::callChatAPI(const String& input, const std::vector<String>& context, String& response) {
-    // TODO: 根据Coze API文档完善此实现
-    // 参考文档: https://www.coze.cn/open/docs/chat
+    // 根据用户提供的Coze示例代码实现
+    // 示例使用: http://kfdcyyzqgx.coze.site/run
+    // 请求格式: {"messages": [{"role": "user", "content": "..."}]}
+    // 响应格式: {"messages": [{"role": "user", "content": "..."}, {"type": "ai", "content": "..."}]}
 
     if (!networkManager || !networkManager->isConnected()) {
         lastError = "Network not available";
         ESP_LOGE(TAG, "Network not available for Coze API call");
-        return false;
-    }
-
-    if (config.apiKey.isEmpty()) {
-        lastError = "API key not configured";
-        ESP_LOGE(TAG, "Coze API key not configured");
-        return false;
-    }
-
-    if (config.botId.isEmpty()) {
-        lastError = "Bot ID not configured";
-        ESP_LOGE(TAG, "Coze Bot ID not configured");
         return false;
     }
 
@@ -380,9 +371,13 @@ bool CozeDialogueService::callChatAPI(const String& input, const std::vector<Str
 
     // 构建请求头
     std::map<String, String> headers;
-    headers["Authorization"] = "Bearer " + config.apiKey;
     headers["Content-Type"] = "application/json";
-    headers["Accept"] = "application/json";
+
+    // 添加认证头（如果配置了API密钥）
+    if (!config.apiKey.isEmpty()) {
+        headers["Authorization"] = "Bearer " + config.apiKey;
+        headers["Accept"] = "application/json";
+    }
 
     // 构建请求JSON
     String requestBody = buildChatRequestJSON(input, context);
@@ -395,7 +390,23 @@ bool CozeDialogueService::callChatAPI(const String& input, const std::vector<Str
     ESP_LOGV(TAG, "Coze request body: %s", requestBody.c_str());
 
     // 发送HTTP请求
-    HttpResponse httpResponse = networkManager->postJson(config.endpoint, requestBody, headers);
+    String endpoint = config.endpoint;
+
+    // 增加超时时间到15秒（从5秒增加）
+    HttpRequestConfig requestConfig;
+    requestConfig.url = endpoint;
+    requestConfig.method = HttpMethod::POST;
+    requestConfig.body = requestBody;
+    requestConfig.headers = headers;
+    requestConfig.timeout = 15000; // 15秒超时
+    requestConfig.maxRetries = 1;
+    requestConfig.followRedirects = false;
+    requestConfig.useSSL = endpoint.startsWith("https://");
+
+    ESP_LOGI(TAG, "Coze API request: endpoint=%s, useSSL=%s, timeout=%dms",
+             endpoint.c_str(), requestConfig.useSSL ? "true" : "false", requestConfig.timeout);
+
+    HttpResponse httpResponse = networkManager->sendRequest(requestConfig);
 
     // 检查响应
     ESP_LOGI(TAG, "Coze API response status: %d, time: %dms",
@@ -404,7 +415,7 @@ bool CozeDialogueService::callChatAPI(const String& input, const std::vector<Str
     if (httpResponse.statusCode != 200) {
         lastError = "Coze API request failed with status: " + String(httpResponse.statusCode);
         if (!httpResponse.body.isEmpty()) {
-            lastError += ", response: " + httpResponse.body;
+            lastError += ", response: " + httpResponse.body.substring(0, 200);
             ESP_LOGE(TAG, "Coze API error response: %s", httpResponse.body.c_str());
         }
         ESP_LOGE(TAG, "Coze API failed: %s", lastError.c_str());
@@ -413,6 +424,7 @@ bool CozeDialogueService::callChatAPI(const String& input, const std::vector<Str
 
     // 解析响应
     bool parseSuccess = parseChatResponse(httpResponse.body, response);
+
     if (!parseSuccess) {
         lastError = "Failed to parse Coze API response";
         ESP_LOGE(TAG, "Failed to parse Coze response: %s", httpResponse.body.c_str());
@@ -728,7 +740,15 @@ String CozeDialogueService::buildStreamRequestJSON(const String& input, const st
 
 bool CozeDialogueService::parseChatResponse(const String& jsonResponse, String& output) const {
     // 解析Coze API响应JSON
-    // 参考Coze API响应格式
+    // 支持多种响应格式：
+    // 1. 根级别messages数组格式（coze.site API）: {"messages": [{"type": "ai", "content": "..."}, ...]}
+    // 2. 标准Coze API格式: {"code": 0, "data": {"messages": [...]}}
+    // 3. 其他常见格式
+
+    // 解析前的内存监控
+    ESP_LOGI(TAG, "=== Coze API响应解析前内存状态 ===");
+    MemoryUtils::printDetailedMemoryStatus("Pre-Coze Parse");
+    MemoryUtils::monitorTaskStacks("Pre-Coze Parse");
 
     DynamicJsonDocument responseDoc(4096);
     DeserializationError error = deserializeJson(responseDoc, jsonResponse);
@@ -748,23 +768,51 @@ bool CozeDialogueService::parseChatResponse(const String& jsonResponse, String& 
         return false;
     }
 
-    // 根据Coze API响应格式提取回复
-    // 常见响应格式：
-    // {
-    //   "code": 0,
-    //   "msg": "success",
-    //   "data": {
-    //     "messages": [
-    //       {
-    //         "role": "assistant",
-    //         "content": "助手回复内容",
-    //         "type": "answer"
-    //       }
-    //     ],
-    //     "conversation_id": "xxx"
-    //   }
-    // }
+    // 首先检查根级别的messages数组（coze.site API格式）
+    if (responseDoc.containsKey("messages") && responseDoc["messages"].is<JsonArray>()) {
+        JsonArray messages = responseDoc["messages"];
+        ESP_LOGI(TAG, "Found root-level messages array with %d messages", messages.size());
 
+        for (JsonObject msg : messages) {
+            String type = msg["type"] | "";
+            String content = msg["content"] | "";
+            String role = msg["role"] | "";
+
+            ESP_LOGD(TAG, "Message: type=%s, role=%s, content length=%d",
+                     type.c_str(), role.c_str(), content.length());
+
+            // 查找type为"ai"或role为"assistant"的消息
+            if ((type == "ai" || role == "assistant") && !content.isEmpty()) {
+                output = content;
+                ESP_LOGI(TAG, "Extracted AI reply from root-level messages: %s", output.c_str());
+
+                // 解析成功后的内存监控
+                ESP_LOGI(TAG, "=== Coze API响应解析成功后内存状态 ===");
+                MemoryUtils::printDetailedMemoryStatus("Post-Coze Parse Success");
+                MemoryUtils::monitorTaskStacks("Post-Coze Parse Success");
+
+                return true;
+            }
+        }
+
+        // 如果没有找到type为"ai"的消息，尝试查找第一个非空content
+        for (JsonObject msg : messages) {
+            String content = msg["content"] | "";
+            if (!content.isEmpty()) {
+                output = content;
+                ESP_LOGI(TAG, "Extracted first non-empty content from root-level messages: %s", output.c_str());
+
+                // 解析成功后的内存监控
+                ESP_LOGI(TAG, "=== Coze API响应解析成功后内存状态（第一个非空内容）===");
+                MemoryUtils::printDetailedMemoryStatus("Post-Coze Parse First Non-Empty");
+                MemoryUtils::monitorTaskStacks("Post-Coze Parse First Non-Empty");
+
+                return true;
+            }
+        }
+    }
+
+    // 然后检查标准Coze API格式（data字段）
     if (responseDoc.containsKey("data")) {
         JsonObject data = responseDoc["data"];
 
@@ -778,7 +826,13 @@ bool CozeDialogueService::parseChatResponse(const String& jsonResponse, String& 
 
                 if ((role == "assistant" || type == "answer") && !content.isEmpty()) {
                     output = content;
-                    ESP_LOGI(TAG, "Extracted assistant reply: %s", output.c_str());
+                    ESP_LOGI(TAG, "Extracted assistant reply from data.messages: %s", output.c_str());
+
+                    // 解析成功后的内存监控
+                    ESP_LOGI(TAG, "=== Coze API响应解析成功后内存状态（data.messages）===");
+                    MemoryUtils::printDetailedMemoryStatus("Post-Coze Parse Data Messages");
+                    MemoryUtils::monitorTaskStacks("Post-Coze Parse Data Messages");
+
                     return true;
                 }
             }
@@ -788,6 +842,12 @@ bool CozeDialogueService::parseChatResponse(const String& jsonResponse, String& 
         if (data.containsKey("reply")) {
             output = data["reply"].as<String>();
             ESP_LOGI(TAG, "Extracted reply field: %s", output.c_str());
+
+            // 解析成功后的内存监控
+            ESP_LOGI(TAG, "=== Coze API响应解析成功后内存状态（data.reply）===");
+            MemoryUtils::printDetailedMemoryStatus("Post-Coze Parse Data Reply");
+            MemoryUtils::monitorTaskStacks("Post-Coze Parse Data Reply");
+
             return true;
         }
 
@@ -795,6 +855,12 @@ bool CozeDialogueService::parseChatResponse(const String& jsonResponse, String& 
         if (data.containsKey("content")) {
             output = data["content"].as<String>();
             ESP_LOGI(TAG, "Extracted content field: %s", output.c_str());
+
+            // 解析成功后的内存监控
+            ESP_LOGI(TAG, "=== Coze API响应解析成功后内存状态（data.content）===");
+            MemoryUtils::printDetailedMemoryStatus("Post-Coze Parse Data Content");
+            MemoryUtils::monitorTaskStacks("Post-Coze Parse Data Content");
+
             return true;
         }
     }
@@ -807,6 +873,12 @@ bool CozeDialogueService::parseChatResponse(const String& jsonResponse, String& 
             if (choice.containsKey("message") && choice["message"].containsKey("content")) {
                 output = choice["message"]["content"].as<String>();
                 ESP_LOGI(TAG, "Extracted from choices: %s", output.c_str());
+
+                // 解析成功后的内存监控
+                ESP_LOGI(TAG, "=== Coze API响应解析成功后内存状态（choices）===");
+                MemoryUtils::printDetailedMemoryStatus("Post-Coze Parse Choices");
+                MemoryUtils::monitorTaskStacks("Post-Coze Parse Choices");
+
                 return true;
             }
         }
@@ -816,14 +888,27 @@ bool CozeDialogueService::parseChatResponse(const String& jsonResponse, String& 
     if (responseDoc.containsKey("text")) {
         output = responseDoc["text"].as<String>();
         ESP_LOGI(TAG, "Extracted text field: %s", output.c_str());
+
+        // 解析成功后的内存监控
+        ESP_LOGI(TAG, "=== Coze API响应解析成功后内存状态（text字段）===");
+        MemoryUtils::printDetailedMemoryStatus("Post-Coze Parse Text Field");
+        MemoryUtils::monitorTaskStacks("Post-Coze Parse Text Field");
+
         return true;
     }
 
     // 最后手段：返回原始响应（调试用）
     output = jsonResponse.substring(0, 200); // 截断长响应
     ESP_LOGW(TAG, "Could not extract standard response, returning raw: %s", output.c_str());
+
+    // 解析失败后的内存监控
+    ESP_LOGI(TAG, "=== Coze API响应解析失败后内存状态 ===");
+    MemoryUtils::printDetailedMemoryStatus("Post-Coze Parse Failed");
+    MemoryUtils::monitorTaskStacks("Post-Coze Parse Failed");
+
     return false;
 }
+
 
 bool CozeDialogueService::parseStreamChunk(const String& chunkData, String& text, bool& isLast) const {
     // TODO: 解析流式分片（保留用于兼容性）

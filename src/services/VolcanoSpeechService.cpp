@@ -688,23 +688,45 @@ bool VolcanoSpeechService::callRecognitionAPI(const uint8_t *audio_data, size_t 
     // 构建请求头 - 与语音合成API保持一致
     std::map<String, String> headers;
 
-    // 使用Bearer Token认证（Access Token），注意使用分号而不是空格
+    // 使用Bearer Token认证（Access Token）
     // config.secretKey字段存储Access Token
+    // 火山API使用"Bearer;"格式（带分号）
     if (!config.secretKey.isEmpty())
     {
         headers["Authorization"] = "Bearer;" + config.secretKey;
-        ESP_LOGI(TAG, "Using Bearer token authentication (secretKey)");
+        ESP_LOGI(TAG, "Using Bearer token authentication (secretKey) with semicolon");
     }
     else
     {
         // 如果没有配置Access Token，尝试使用API Key作为备用
         headers["Authorization"] = "Bearer;" + config.apiKey;
-        ESP_LOGW(TAG, "Using API key as Access Token (may fail)");
+        ESP_LOGW(TAG, "Using API key as Access Token (may fail) with semicolon");
+    }
+
+    // 添加火山API特定的头部（与语音合成API保持一致）
+    // X-Api-App-Id: APP ID
+    if (!config.apiKey.isEmpty())
+    {
+        headers["X-Api-App-Id"] = config.apiKey;
+    }
+    else if (!config.appId.isEmpty())
+    {
+        headers["X-Api-App-Id"] = config.appId;
+    }
+
+    // X-Api-Access-Key: Access Token
+    if (!config.secretKey.isEmpty())
+    {
+        headers["X-Api-Access-Key"] = config.secretKey;
+    }
+    else
+    {
+        // 如果没有配置Access Token，尝试使用API Key作为备用
+        headers["X-Api-Access-Key"] = config.apiKey;
+        ESP_LOGW(TAG, "Using API key as X-Api-Access-Key (may fail)");
     }
 
     headers["Content-Type"] = "application/json";
-    // 根据文档，可能还需要X-App-Id头，但文档未明确要求，先保留
-    headers["X-App-Id"] = config.apiKey;
 
     // 调试：打印认证信息（隐藏完整token）
     ESP_LOGI(TAG, "Auth config - API Key: %s, Secret Key length: %d",
@@ -1130,6 +1152,17 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
 
     headers["Content-Type"] = "application/json";
 
+    // 添加标准的Authorization头（火山API可能需要）
+    // 根据文档，格式为"Bearer;${token}"（带分号）
+    if (!config.secretKey.isEmpty()) {
+        headers["Authorization"] = "Bearer;" + config.secretKey;
+        ESP_LOGI(TAG, "Added Authorization header with Bearer; format");
+    } else if (!config.apiKey.isEmpty()) {
+        // 备用：使用API Key作为token
+        headers["Authorization"] = "Bearer;" + config.apiKey;
+        ESP_LOGW(TAG, "Added Authorization header using API key as token");
+    }
+
     // 构建请求体，根据火山引擎API文档格式
     // 参考请求示例：
     // {
@@ -1139,10 +1172,16 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     //   "request": {"reqid": "uuid", "text": "...", "operation": "query"}
     // }
 
-    DynamicJsonDocument requestDoc(2048); // 需要更大空间因为嵌套结构
+    // 使用堆分配避免栈溢出
+    DynamicJsonDocument* requestDoc = new DynamicJsonDocument(1024);
+    if (!requestDoc) {
+        lastError = "Failed to allocate memory for JSON request";
+        ESP_LOGE(TAG, "Failed to allocate DynamicJsonDocument for request");
+        return false;
+    }
 
     // app对象
-    JsonObject appObj = requestDoc.createNestedObject("app");
+    JsonObject appObj = requestDoc->createNestedObject("app");
     appObj["appid"] = config.apiKey; // APP ID
     // token字段：文档说明是"无实际鉴权作用的Fake token，可传任意非空字符串"
     // 但实际可能需传Access Token，这里使用secretKey或apiKey
@@ -1150,11 +1189,11 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     appObj["cluster"] = "volcano_tts"; // 固定值
 
     // user对象
-    JsonObject userObj = requestDoc.createNestedObject("user");
+    JsonObject userObj = requestDoc->createNestedObject("user");
     userObj["uid"] = "esp32_user"; // 固定用户ID，可配置
 
     // audio对象
-    JsonObject audioObj = requestDoc.createNestedObject("audio");
+    JsonObject audioObj = requestDoc->createNestedObject("audio");
     audioObj["voice_type"] = config.voice; // 音色类型
     audioObj["encoding"] = "pcm";          // 音频编码格式，与音频驱动匹配
     audioObj["rate"] = 16000;              // 采样率，应与音频驱动匹配
@@ -1162,7 +1201,7 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     // 可添加其他参数：volume, loudness_ratio等
 
     // request对象
-    JsonObject requestObj = requestDoc.createNestedObject("request");
+    JsonObject requestObj = requestDoc->createNestedObject("request");
     // 生成唯一请求ID（简化：使用时间戳）
     uint32_t timestamp = (uint32_t)time(nullptr);
     requestObj["reqid"] = "esp32_" + String(timestamp) + "_" + String(rand());
@@ -1170,13 +1209,24 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     requestObj["operation"] = "query"; // 非流式操作
 
     String requestBody;
-    serializeJson(requestDoc, requestBody);
+    serializeJson(*requestDoc, requestBody);
+    delete requestDoc; // 清理堆分配，不再需要
 
     ESP_LOGI(TAG, "Sending synthesis request to: %s", SYNTHESIS_API);
     ESP_LOGV(TAG, "Request body: %s", requestBody.c_str());
 
+    // 发送HTTP请求前的内存监控（特别关注栈使用）
+    ESP_LOGI(TAG, "=== 语音合成API调用前内存状态 ===");
+    MemoryUtils::printDetailedMemoryStatus("Pre-Synthesis API Call");
+    MemoryUtils::monitorTaskStacks("Pre-Synthesis API Call");
+
     // 发送HTTP请求
     HttpResponse response = networkManager->postJson(SYNTHESIS_API, requestBody, headers);
+
+    // 发送HTTP请求后的内存监控
+    ESP_LOGI(TAG, "=== 语音合成API调用后内存状态 ===");
+    MemoryUtils::printDetailedMemoryStatus("Post-Synthesis API Call");
+    MemoryUtils::monitorTaskStacks("Post-Synthesis API Call");
 
     // 检查响应
     ESP_LOGI(TAG, "Synthesis API response status: %d, time: %dms",
@@ -1216,8 +1266,15 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     //   "addition": {"duration": "1960"}
     // }
 
-    DynamicJsonDocument responseDoc(4096);
-    DeserializationError error = deserializeJson(responseDoc, response.body);
+    // 使用堆分配避免栈溢出 - 火山API响应可能包含大量base64数据
+    DynamicJsonDocument* responseDoc = new DynamicJsonDocument(8192); // 8KB堆分配
+    if (!responseDoc) {
+        lastError = "Failed to allocate memory for JSON parsing";
+        ESP_LOGE(TAG, "Failed to allocate DynamicJsonDocument on heap");
+        return false;
+    }
+
+    DeserializationError error = deserializeJson(*responseDoc, response.body);
 
     if (error)
     {
@@ -1227,28 +1284,31 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     }
 
     // 检查API返回码
-    int code = responseDoc["code"] | -1;
+    int code = (*responseDoc)["code"] | -1;
     if (code != 3000)
     { // 3000表示成功
-        String message = responseDoc["message"] | "Unknown error";
+        String message = (*responseDoc)["message"] | "Unknown error";
         lastError = "API error " + String(code) + ": " + message;
         ESP_LOGE(TAG, "Synthesis API returned error: %s", lastError.c_str());
+        delete responseDoc; // 清理堆分配
         return false;
     }
 
     // 提取base64编码的音频数据
-    if (!responseDoc.containsKey("data") || !responseDoc["data"].is<String>())
+    if (!responseDoc->containsKey("data") || !(*responseDoc)["data"].is<String>())
     {
         lastError = "No audio data in API response";
         ESP_LOGE(TAG, "Response missing data field: %s", response.body.substring(0, 200).c_str());
+        delete responseDoc; // 清理堆分配
         return false;
     }
 
-    String audioBase64 = responseDoc["data"].as<String>();
+    String audioBase64 = (*responseDoc)["data"].as<String>();
     if (audioBase64.isEmpty())
     {
         lastError = "Empty audio data in API response";
         ESP_LOGE(TAG, "Empty data field in response");
+        delete responseDoc; // 清理堆分配
         return false;
     }
 
@@ -1265,10 +1325,12 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
         {
             ESP_LOGE(TAG, "First 10 chars: %.10s", audioBase64.c_str());
         }
+        delete responseDoc; // 清理堆分配
         return false;
     }
 
     ESP_LOGI(TAG, "Successfully decoded base64 audio data, size: %u bytes", audio_data.size());
+    delete responseDoc; // 清理堆分配
     return true;
 }
 

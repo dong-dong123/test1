@@ -2,6 +2,8 @@
 #include "MemoryUtils.h"
 #include <esp_log.h>
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 static const char* TAG = "MemoryUtils";
 
@@ -168,6 +170,27 @@ void MemoryUtils::printDetailedMemoryStatus(const char* tag) {
         ESP_LOGI(TAG, "【PSRAM】碎片评分=%u/100", fragScore);
     } else {
         ESP_LOGI(TAG, "【PSRAM】不可用");
+    }
+
+    // 栈使用信息（简化版，只监控高水位标记）
+    // 注意：由于FreeRTOS版本差异，无法直接获取所有任务状态，只监控当前任务
+    ESP_LOGI(TAG, "【栈监控】监控当前任务栈高水位标记（剩余空间）");
+
+    // 监控当前任务栈
+    TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+    if (currentTask) {
+        UBaseType_t highWaterMarkWords = uxTaskGetStackHighWaterMark(currentTask);
+        size_t highWaterMarkBytes = highWaterMarkWords * sizeof(StackType_t);
+        const char* taskName = pcTaskGetTaskName(currentTask);
+
+        ESP_LOGI(TAG, "  当前任务: %s, 栈剩余空间: %u 字节",
+                taskName ? taskName : "unknown", highWaterMarkBytes);
+
+        // 警告低栈空间（高水位标记太小）
+        // 阈值：小于1KB（256字，假设StackType_t为4字节）
+        if (highWaterMarkBytes < 1024) {
+            ESP_LOGW(TAG, "【栈警告】当前任务栈剩余空间不足1KB!");
+        }
     }
 
     ESP_LOGI(TAG, "========================================");
@@ -509,4 +532,78 @@ void MemoryUtils::periodicDefragmentationCheck() {
 
     // 打印内存状态（调试信息）
     printMemoryStatus("periodic_check");
+}
+
+// ============================================================================
+// 栈使用监控
+// ============================================================================
+
+void MemoryUtils::monitorTaskStacks(const char* tag) {
+    ESP_LOGI(TAG, "========== [%s] 任务栈监控 ==========", tag ? tag : "Stack");
+
+    // 获取任务数量
+    UBaseType_t taskCount = uxTaskGetNumberOfTasks();
+    ESP_LOGI(TAG, "总任务数: %u", taskCount);
+
+    // 简化版：只监控当前任务
+    // 注意：由于FreeRTOS版本差异，无法直接获取所有任务状态
+    TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+    if (currentTask) {
+        UBaseType_t highWaterMarkWords = uxTaskGetStackHighWaterMark(currentTask);
+        size_t highWaterMarkBytes = highWaterMarkWords * sizeof(StackType_t);
+        const char* taskName = pcTaskGetTaskName(currentTask);
+
+        ESP_LOGI(TAG, "当前任务: %s", taskName ? taskName : "unknown");
+        ESP_LOGI(TAG, "  栈高水位标记: %u 字 (最低空闲: %u 字节)",
+                highWaterMarkWords, highWaterMarkBytes);
+        ESP_LOGI(TAG, "  注意: 由于FreeRTOS版本限制，只能监控当前任务");
+
+        // 警告低栈空间（高水位标记太小）
+        // 阈值：小于1KB（256字，假设StackType_t为4字节）
+        if (highWaterMarkBytes < 1024) {
+            ESP_LOGW(TAG, "  警告: 栈剩余空间不足1KB!");
+        }
+    }
+
+    ESP_LOGI(TAG, "======================================");
+}
+
+size_t MemoryUtils::getTaskStackHighWaterMark(TaskHandle_t task) {
+    if (task == nullptr) {
+        task = xTaskGetCurrentTaskHandle();
+    }
+
+    UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(task);
+    return highWaterMark * sizeof(StackType_t); // 转换为字节
+}
+
+void MemoryUtils::printTaskStackInfo(const char* tag) {
+    ESP_LOGI(TAG, "========== [%s] 任务栈信息 ==========", tag ? tag : "TaskStacks");
+
+    // 获取当前任务
+    TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+    const char* currentTaskName = pcTaskGetTaskName(currentTask);
+
+    // 获取当前任务栈信息
+    size_t currentHighWaterMark = getTaskStackHighWaterMark(currentTask);
+
+    ESP_LOGI(TAG, "当前任务: %s", currentTaskName ? currentTaskName : "unknown");
+    ESP_LOGI(TAG, "栈高水位标记: %u 字节 (最低空闲)", currentHighWaterMark);
+
+    // 监控所有任务栈
+    monitorTaskStacks(tag);
+}
+
+size_t MemoryUtils::getTotalStackUsage() {
+    // 注意：由于FreeRTOS版本差异，无法直接获取栈大小
+    // 返回0表示功能不可用
+    ESP_LOGW(TAG, "getTotalStackUsage: 功能不可用（FreeRTOS版本差异）");
+    return 0;
+}
+
+size_t MemoryUtils::getPeakStackUsage() {
+    // 注意：由于FreeRTOS版本差异，无法直接获取栈大小
+    // 返回0表示功能不可用
+    ESP_LOGW(TAG, "getPeakStackUsage: 功能不可用（FreeRTOS版本差异）");
+    return 0;
 }

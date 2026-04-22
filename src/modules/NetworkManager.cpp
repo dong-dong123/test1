@@ -739,6 +739,11 @@ String NetworkManager::getScannedNetwork(int index) const
 HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
 {
     HttpResponse finalResponse;
+
+    // 栈监控：在发送HTTP请求前检查栈使用情况
+    ESP_LOGI(TAG, "=== HTTP请求前栈监控 ===");
+    MemoryUtils::monitorTaskStacks("Pre-HTTP Request");
+
     // PSRAM内存监控
     if (MemoryUtils::isPSRAMAvailable()) {
         size_t freePSRAM = MemoryUtils::getFreePSRAM();
@@ -1056,6 +1061,10 @@ HttpResponse NetworkManager::sendRequest(const HttpRequestConfig &config)
     {
         ESP_LOGE(TAG, "Request failed after all retries, final error: %s", finalResponse.errorMessage.c_str());
     }
+
+    // 栈监控：在发送HTTP请求后检查栈使用情况
+    ESP_LOGI(TAG, "=== HTTP请求后栈监控 ===");
+    MemoryUtils::monitorTaskStacks("Post-HTTP Request");
 
     return finalResponse;
 }

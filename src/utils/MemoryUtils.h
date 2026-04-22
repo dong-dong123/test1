@@ -40,6 +40,13 @@ public:
     static bool needsDefragmentation();     // 检查是否需要碎片整理
     static void smartDefragmentPSRAM();     // 智能碎片整理（根据碎片程度调整策略）
     static void periodicDefragmentationCheck(); // 周期性碎片检查（应在主循环中调用）
+
+    // 栈使用监控
+    static void monitorTaskStacks(const char* tag = ""); // 监控所有任务栈使用情况
+    static size_t getTaskStackHighWaterMark(TaskHandle_t task = nullptr); // 获取任务栈高水位标记
+    static void printTaskStackInfo(const char* tag = ""); // 打印所有任务栈信息
+    static size_t getTotalStackUsage(); // 获取总栈使用量（估算）
+    static size_t getPeakStackUsage(); // 获取峰值栈使用量
 };
 
 // 便捷宏

@@ -80,7 +80,11 @@
       "Bash(git check-ignore:*)",
       "Bash(git worktree:*)",
       "Bash(g++ -std=c++11 -fsyntax-only -I. -I./src -I./src/config src/config/ConfigData.h)",
-      "Bash(cmd.exe /c \"cd /d \\\\\"c:\\\\\\\\Users\\\\\\\\Admin\\\\\\\\Documents\\\\\\\\PlatformIO\\\\\\\\Projects\\\\\\\\test1\\\\\\\\.worktrees\\\\\\\\feature\\\\\\\\dual-vad-thresholds\\\\\" && platformio run\")"
+      "Bash(cmd.exe /c \"cd /d \\\\\"c:\\\\\\\\Users\\\\\\\\Admin\\\\\\\\Documents\\\\\\\\PlatformIO\\\\\\\\Projects\\\\\\\\test1\\\\\\\\.worktrees\\\\\\\\feature\\\\\\\\dual-vad-thresholds\\\\\" && platformio run\")",
+      "Bash(platformio.exe run *)",
+      "Bash(/c/Users/Admin/.platformio/penv/Scripts/platformio.exe test *)",
+      "Bash(python test_coze_parser.py)",
+      "Bash(python test_coze_parser_simple.py)"
     ]
   }
 }

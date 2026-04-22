@@ -138,12 +138,17 @@ bool MainApplication::initialize() {
     // 创建定期内存监控任务
     xTaskCreate([](void* param) {
         while (true) {
-            MemoryUtils::printMemoryStatus("Periodic Check");
+            // 详细内存状态（包括栈监控）
+            MemoryUtils::printDetailedMemoryStatus("Periodic Check");
+
+            // 特别监控任务栈使用情况
+            MemoryUtils::monitorTaskStacks("Periodic Stack Check");
+
             vTaskDelay(pdMS_TO_TICKS(30000)); // 每30秒
         }
-    }, "MemoryMonitor", 2048, nullptr, 1, nullptr);
+    }, "MemoryMonitor", 4096, nullptr, 1, nullptr); // 增加栈大小到4KB以容纳更复杂的监控
 
-    ESP_LOGI(TAG, "Memory monitoring task created");
+    ESP_LOGI(TAG, "Enhanced memory monitoring task created");
 
     return true;
 }
