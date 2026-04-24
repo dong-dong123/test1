@@ -36,7 +36,7 @@ AudioDriver::AudioDriver() :
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = 8,      // 从16降回8，减少内存占用
         .dma_buf_len = 512,      // 减少到512，可能提高稳定性
-        .use_apll = true,       // 启用APLL，提供更稳定的时钟
+        .use_apll = false,      // 禁用APLL避免时钟抖动噪声（APLL可能导致I2S时钟抖动产生噪音）
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0,
         .mclk_multiple = I2S_MCLK_MULTIPLE_256,
@@ -113,6 +113,26 @@ bool AudioDriver::initialize(const AudioDriverConfig& cfg) {
         return false;
     }
 
+    // 预创建播放任务（避免在内存紧张时动态创建失败）
+    // 任务创建后立即阻塞等待通知，startPlay()时唤醒
+    xTaskCreatePinnedToCore(
+        playTask,
+        "AudioPlay",
+        8192,  // 增大到8192字节防止栈溢出（内部有转换缓冲区 + i2s_write调用链）
+        this,
+        2,
+        const_cast<TaskHandle_t*>(&playTaskHandle),
+        0  // 在核心0上运行（与核心1分开）
+    );
+
+    if (playTaskHandle == nullptr) {
+        ESP_LOGE(TAG, "Failed to pre-create play task");
+        free(audioBuffer);
+        audioBuffer = nullptr;
+        return false;
+    }
+    ESP_LOGI(TAG, "Play task pre-created (waiting for notification)");
+
     isInitialized = true;
     ESP_LOGI(TAG, "AudioDriver initialized successfully");
     ESP_LOGI(TAG, "Sample rate: %lu, Buffer size: %zu", config.sampleRate, config.bufferSize);
@@ -124,6 +144,14 @@ bool AudioDriver::deinitialize() {
     // 停止所有活动
     if (isRecording) stopRecord();
     if (isPlaying) stopPlay();
+
+    // 删除预创建的播放任务
+    TaskHandle_t handle = playTaskHandle;
+    playTaskHandle = nullptr;
+    if (handle != nullptr) {
+        vTaskDelete(handle); // 任务被删除，不再执行
+        ESP_LOGI(TAG, "Play task deleted");
+    }
 
     // 释放缓冲区
     if (audioBuffer) {
@@ -339,6 +367,16 @@ bool AudioDriver::stopRecord() {
 // 播放控制
 // ============================================================================
 
+bool AudioDriver::clearDMABuffers() {
+    esp_err_t err = i2s_zero_dma_buffer(I2S_NUM_0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear I2S DMA buffers: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "I2S DMA buffers cleared");
+    return true;
+}
+
 bool AudioDriver::startPlay() {
     if (!isInitialized) {
         ESP_LOGE(TAG, "AudioDriver not initialized");
@@ -350,23 +388,20 @@ bool AudioDriver::startPlay() {
         return true;
     }
 
-    // 启动播放任务
-    xTaskCreatePinnedToCore(
-        playTask,
-        "AudioPlay",
-        4096,
-        this,
-        2,
-        const_cast<TaskHandle_t*>(&playTaskHandle),
-        1  // 在核心1上运行
-    );
-
     if (playTaskHandle == nullptr) {
-        ESP_LOGE(TAG, "Failed to create play task");
+        ESP_LOGE(TAG, "Play task handle is null (not pre-created)");
         return false;
     }
 
     isPlaying = true;
+    portMEMORY_BARRIER();
+
+    // 清除I2S DMA缓冲区残留数据，消除播放启动噪音
+    clearDMABuffers();
+
+    // 唤醒预创建的播放任务
+    xTaskNotifyGive(playTaskHandle);
+
     ESP_LOGI(TAG, "Playback started");
     return true;
 }
@@ -379,41 +414,8 @@ bool AudioDriver::stopPlay() {
     isPlaying = false;
     portMEMORY_BARRIER(); // 确保isPlaying修改对其他核心可见
 
-    // 等待任务自然结束（最多等待1000ms）
-    uint32_t timeout = 1000; // 毫秒
-    uint32_t start = millis();
-
-    // 获取当前任务句柄的本地副本（带内存屏障确保读取最新值）
-    portMEMORY_BARRIER();
-    TaskHandle_t handle = playTaskHandle;
-
-    while (handle != nullptr && (millis() - start) < timeout) {
-        // 检查任务状态
-        eTaskState taskState = eTaskGetState(handle);
-        if (taskState == eDeleted || taskState == eInvalid) {
-            // 任务已经结束
-            portMEMORY_BARRIER();
-            playTaskHandle = nullptr;
-            portMEMORY_BARRIER();
-            break;
-        }
-
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-
-        // 更新句柄副本（任务可能已退出并清除了句柄，带内存屏障）
-        portMEMORY_BARRIER();
-        handle = playTaskHandle;
-    }
-
-    // 如果任务仍在运行，记录警告（不强制删除以避免崩溃）
-    if (handle != nullptr) {
-        ESP_LOGW(TAG, "Play task didn't exit gracefully after %dms timeout", timeout);
-        // 不强制删除，避免双重删除导致崩溃
-        // 任务可能在稍后自行清理
-        portMEMORY_BARRIER();
-        playTaskHandle = nullptr;
-        portMEMORY_BARRIER();
-    }
+    // 播放任务会检测到isPlaying=false后自动回到等待状态
+    // 任务本身不删除，下次startPlay()时直接唤醒
 
     ESP_LOGI(TAG, "Playback stopped");
     return true;
@@ -865,30 +867,33 @@ bool AudioDriver::testSpeaker() {
         return false;
     }
 
-    ESP_LOGI(TAG, "Testing speaker...");
+    ESP_LOGI(TAG, "Testing speaker (32-bit I2S mode)...");
 
-    // 生成测试音调（正弦波）
-    const size_t testLength = 1024;
-    uint8_t testTone[testLength];
+    // 生成32-bit测试音调（匹配I2S 32位帧配置）
+    const size_t numSamples = 512;
+    uint32_t testTone[numSamples];
     const float frequency = 440.0f; // A4音
-    const float amplitude = 0.5f;
+    const float amplitude = 0.3f;   // 降低音量保护扬声器
 
-    for (size_t i = 0; i < testLength / 2; i++) {
+    for (size_t i = 0; i < numSamples; i++) {
         int16_t sample = (int16_t)(amplitude * 32767.0f *
             sin(2.0f * M_PI * frequency * i / config.sampleRate));
-        testTone[i * 2] = sample & 0xFF;
-        testTone[i * 2 + 1] = (sample >> 8) & 0xFF;
+        testTone[i] = (int32_t)sample << 16; // 左移16位匹配I2S 32位帧
     }
 
-    // 直接使用i2s_write测试扬声器，不依赖环形缓冲区
+    // 播放前清除DMA缓冲区
+    clearDMABuffers();
+
+    // 直接使用i2s_write测试扬声器
     size_t bytesWritten = 0;
-    esp_err_t err = i2s_write(I2S_NUM_0, testTone, testLength, &bytesWritten, portMAX_DELAY);
-    if (err == ESP_OK && bytesWritten == testLength) {
-        ESP_LOGI(TAG, "Speaker test passed: wrote %zu bytes", bytesWritten);
+    esp_err_t err = i2s_write(I2S_NUM_0, testTone, sizeof(testTone), &bytesWritten, portMAX_DELAY);
+    if (err == ESP_OK && bytesWritten == sizeof(testTone)) {
+        ESP_LOGI(TAG, "Speaker test passed: wrote %zu bytes (%zu samples)",
+                 bytesWritten, numSamples);
         return true;
     } else {
         ESP_LOGE(TAG, "Speaker test failed: err=%s, written %zu/%zu bytes",
-                 err != ESP_OK ? esp_err_to_name(err) : "OK", bytesWritten, testLength);
+                 err != ESP_OK ? esp_err_to_name(err) : "OK", bytesWritten, sizeof(testTone));
         return false;
     }
 }
@@ -1305,34 +1310,104 @@ void AudioDriver::playTask(void* parameter) {
         return;
     }
 
-    ESP_LOGI(TAG, "Play task started");
+    // 使用堆分配代替栈分配，避免栈溢出（4096字节栈经不起大数组 + i2s_write链）
+    // tempBuffer: 512字节（256个16-bit样本）
+    uint8_t* tempBuffer = (uint8_t*)heap_caps_malloc(512, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // convertedBuffer: 1024字节（256个32-bit样本）
+    uint32_t* convertedBuffer = (uint32_t*)heap_caps_malloc(1024, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!tempBuffer || !convertedBuffer) {
+        ESP_LOGE(TAG, "Failed to allocate play buffers");
+        heap_caps_free(tempBuffer);
+        heap_caps_free(convertedBuffer);
+        vTaskDelete(nullptr);
+        return;
+    }
 
-    size_t bytesToWrite = 0;
-    uint8_t writeBuffer[1024];
+    // 栈高水位监控
+    TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+    UBaseType_t lastStackHighWater = 0;
 
-    while (driver->isPlaying) {
-        // 从环形缓冲区读取数据
-        bytesToWrite = driver->readAudioData(writeBuffer, sizeof(writeBuffer));
+    while (true) {
+        // 等待播放通知（阻塞，不消耗CPU）
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        if (bytesToWrite > 0) {
-            // 写入I2S
-            size_t bytesWritten = 0;
-            esp_err_t err = i2s_write(I2S_NUM_0, writeBuffer, bytesToWrite, &bytesWritten, portMAX_DELAY);
+        Serial.printf("[AudioDriver] Play task started, free heap: %zu\n", esp_get_free_heap_size());
+        Serial.printf("[AudioDriver] Buffer state: readPos=%zu writePos=%zu bufferSize=%zu\n",
+                      driver->bufferReadPos, driver->bufferWritePos, driver->config.bufferSize);
 
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "I2S write error: %s", esp_err_to_name(err));
+        bool dataSeen = false;      // 是否收到过数据
+        uint32_t totalPlayed = 0;   // 累计播放字节数
+
+        // 从环形缓冲区读取16-bit PCM并转换为32-bit PCM写入I2S
+        while (driver->isPlaying) {
+            // 周期性栈监控
+            UBaseType_t highWater = uxTaskGetStackHighWaterMark(currentTask);
+            if (highWater != lastStackHighWater) {
+                Serial.printf("[AudioDriver] Stack high water: %u bytes free\n",
+                              highWater * sizeof(StackType_t));
+                lastStackHighWater = highWater;
             }
-        } else {
-            // 无数据，短暂休眠
-            vTaskDelay(10 / portTICK_PERIOD_MS);
+
+            size_t bytesRead = driver->readAudioData(tempBuffer, 512);
+
+            if (bytesRead > 0) {
+                dataSeen = true;
+                totalPlayed += bytesRead;
+
+                // 每跨过64KB边界日志一次进度
+                if ((totalPlayed >> 16) != ((totalPlayed - bytesRead) >> 16)) {
+                    Serial.printf("[AudioDriver] Progress: %u bytes (readPos=%zu writePos=%zu)\n",
+                                  totalPlayed, driver->bufferReadPos, driver->bufferWritePos);
+                }
+
+                size_t sampleCount = bytesRead / 2;
+
+                // 16-bit PCM → 32-bit PCM（左移16位，匹配I2S 32位帧）
+                // 同时应用音量控制
+                float gain = driver->config.volume / 100.0f;
+                for (size_t i = 0; i < sampleCount; i++) {
+                    int16_t sample = ((int16_t*)tempBuffer)[i];
+                    convertedBuffer[i] = (int32_t)(sample * gain) << 16;
+                }
+
+                size_t bytesToWrite = sampleCount * 4;
+                size_t bytesWritten = 0;
+                esp_err_t err = i2s_write(I2S_NUM_0, convertedBuffer,
+                                          bytesToWrite, &bytesWritten, portMAX_DELAY);
+
+                if (err != ESP_OK) {
+                    Serial.printf("[AudioDriver] I2S write error: %s, continuing\n", esp_err_to_name(err));
+                }
+                if (bytesWritten != bytesToWrite) {
+                    Serial.printf("[AudioDriver] I2S write partial: %zu/%zu bytes\n", bytesWritten, bytesToWrite);
+                }
+            } else {
+                if (dataSeen) {
+                    // 已收到过数据且缓冲区已空 → 播放完成
+                    Serial.printf("[AudioDriver] Playback END: totalPlayed=%u, readPos=%zu writePos=%zu\n",
+                                  totalPlayed, driver->bufferReadPos, driver->bufferWritePos);
+
+                    // 等待DMA排空，确保I2S DAC输出完所有数据
+                    vTaskDelay(pdMS_TO_TICKS(100));
+
+                    driver->isPlaying = false;
+                    portMEMORY_BARRIER();
+                    driver->resetBuffer();
+                    // 清零DMA缓冲区，为下次播放做准备（此时DMA已排空，不会丢数据）
+                    i2s_zero_dma_buffer(I2S_NUM_0);
+                } else {
+                    // 尚未收到数据（TTS可能还在写入），短暂等待
+                    vTaskDelay(10 / portTICK_PERIOD_MS);
+                }
+            }
         }
+
+        Serial.printf("[AudioDriver] Playback finished, returning to wait state\n");
     }
 
-    ESP_LOGI(TAG, "Play task ended");
-    if (driver) {
-        driver->clearPlayTaskHandle();
-    }
-    vTaskDelete(nullptr);
+    // 正常情况下不会到达这里（循环永真），但为了完整性释放内存
+    heap_caps_free(tempBuffer);
+    heap_caps_free(convertedBuffer);
 }
 
 // ============================================================================

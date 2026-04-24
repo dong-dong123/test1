@@ -50,7 +50,7 @@ private:
 
     // 音频累积
     // 注意: audioBuffer使用PSRAM优先的动态分配，避免占用160KB内部SRAM
-    static const size_t MAIN_AUDIO_BUFFER_SIZE = 160000;  // 5秒音频（16000Hz * 2字节 * 5秒）
+    static const size_t MAIN_AUDIO_BUFFER_SIZE = 1048576;  // 1MB PSRAM缓冲区（~65秒音频 @ 16kHz 16-bit）
     uint8_t* audioBuffer;          // PSRAM优先的动态分配
     bool audioBufferInPSRAM;       // 标记audioBuffer是否在PSRAM中
     size_t audioBufferPos;
@@ -69,6 +69,13 @@ private:
     bool recognitionPending;      // 是否有待处理的识别请求
     uint32_t recognitionTriggerTime; // 识别触发时间
     bool recognitionActive;       // 识别是否正在进行中
+
+    // 延迟处理标志（打破回调嵌套，避免栈溢出）
+    // 异步识别回调只保存结果并设置标志，实际处理延迟到主循环执行
+    String pendingRecognitionText;   // 待处理的识别结果文本
+    bool pendingDialogue;            // 是否需要执行对话请求
+    String pendingSynthesisText;     // 待合成的文本
+    bool pendingSynthesis;           // 是否需要执行语音合成
 
     // 初始化状态
     enum InitState {
@@ -99,6 +106,8 @@ private:
     void handleError(const String& error);
     void logEvent(const String& event, const String& details = "");
     void handleAsyncRecognitionResult(const AsyncRecognitionResult& result);
+    void processPendingDialogue();   // 从主循环处理对话（避免嵌套在WebSocket回调中）
+    void processPendingSynthesis();  // 从主循环处理合成（避免嵌套在对话回调中）
 
 public:
     MainApplication();

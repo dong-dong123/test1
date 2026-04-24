@@ -13,6 +13,31 @@
 // #include <zlib.h>
 // #endif
 
+// PSRAM分配器 - 用于ArduinoJson解析大型JSON（如TTS base64音频响应）
+// 利用PSRAM（8MB）避免耗尽内部SRAM
+struct PSRAMJsonAllocator {
+    void* allocate(size_t size) {
+        void* ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+        if (!ptr) {
+            ESP_LOGW("PSRAMAllocator", "PSRAM alloc failed (%u bytes), fallback to SRAM", size);
+            ptr = malloc(size);
+        }
+        return ptr;
+    }
+    void deallocate(void* pointer) {
+        free(pointer);
+    }
+    void* reallocate(void* ptr, size_t new_size) {
+        void* new_ptr = heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM);
+        if (!new_ptr) {
+            ESP_LOGW("PSRAMAllocator", "PSRAM realloc failed (%u bytes), fallback to SRAM", new_size);
+            new_ptr = realloc(ptr, new_size);
+        }
+        return new_ptr;
+    }
+};
+using PSRAMJsonDocument = BasicJsonDocument<PSRAMJsonAllocator>;
+
 // 生成Connect ID（UUID格式）
 static String generateConnectId()
 {
@@ -1266,20 +1291,31 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     //   "addition": {"duration": "1960"}
     // }
 
-    // 使用堆分配避免栈溢出 - 火山API响应可能包含大量base64数据
-    DynamicJsonDocument* responseDoc = new DynamicJsonDocument(8192); // 8KB堆分配
-    if (!responseDoc) {
-        lastError = "Failed to allocate memory for JSON parsing";
-        ESP_LOGE(TAG, "Failed to allocate DynamicJsonDocument on heap");
+    // 使用PSRAM分配器解析JSON - TTS响应包含大量base64音频数据（可达数百KB）
+    // 根据响应体长度动态分配文档容量：ArduinoJson解析含大字符串的JSON需要>=JSON文本长度的容量
+    ESP_LOGI(TAG, "TTS response body size: %u bytes", response.body.length());
+    size_t jsonDocSize = response.body.length() + 65536; // JSON文本 + 额外结构开销
+    // 最小32KB，最大不超过PSRAM可用量（PSRAM共8MB，设置3MB安全上限）
+    if (jsonDocSize < 32768) jsonDocSize = 32768;
+    if (jsonDocSize > 3145728) jsonDocSize = 3145728; // 3MB上限应对2MB+响应体
+
+    PSRAMJsonDocument* responseDoc = new PSRAMJsonDocument(jsonDocSize);
+    if (!responseDoc || !responseDoc->capacity()) {
+        lastError = "Failed to allocate PSRAM JSON document";
+        ESP_LOGE(TAG, "Failed to allocate PSRAMJsonDocument (%u bytes)", jsonDocSize);
+        delete responseDoc;
         return false;
     }
+    ESP_LOGI(TAG, "Allocated PSRAMJsonDocument: %u bytes (caps: %u)", jsonDocSize, responseDoc->capacity());
 
     DeserializationError error = deserializeJson(*responseDoc, response.body);
 
     if (error)
     {
         lastError = "Failed to parse API response: " + String(error.c_str());
-        ESP_LOGE(TAG, "JSON parse error: %s", error.c_str());
+        ESP_LOGE(TAG, "JSON parse error: %s (doc size: %u, body len: %u)",
+                 error.c_str(), responseDoc->capacity(), response.body.length());
+        delete responseDoc;
         return false;
     }
 
@@ -1290,7 +1326,7 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
         String message = (*responseDoc)["message"] | "Unknown error";
         lastError = "API error " + String(code) + ": " + message;
         ESP_LOGE(TAG, "Synthesis API returned error: %s", lastError.c_str());
-        delete responseDoc; // 清理堆分配
+        delete responseDoc;
         return false;
     }
 
@@ -1299,7 +1335,7 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     {
         lastError = "No audio data in API response";
         ESP_LOGE(TAG, "Response missing data field: %s", response.body.substring(0, 200).c_str());
-        delete responseDoc; // 清理堆分配
+        delete responseDoc;
         return false;
     }
 
@@ -1308,9 +1344,17 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
     {
         lastError = "Empty audio data in API response";
         ESP_LOGE(TAG, "Empty data field in response");
-        delete responseDoc; // 清理堆分配
+        delete responseDoc;
         return false;
     }
+
+    // 已提取base64数据，释放JSON文档回收PSRAM
+    delete responseDoc;
+    responseDoc = nullptr;
+
+    // 释放response.body回收SRAM（base64字符串在audioBase64中）
+    // 注意：HttpResponse可能被复用，但此处是局部变量，释放无副作用
+    // response.body = String(); // 方法返回后response自动销毁
 
     // 解码base64音频数据
     audio_data = base64Decode(audioBase64);
@@ -1325,12 +1369,44 @@ bool VolcanoSpeechService::callSynthesisAPI(const String &text, std::vector<uint
         {
             ESP_LOGE(TAG, "First 10 chars: %.10s", audioBase64.c_str());
         }
-        delete responseDoc; // 清理堆分配
         return false;
     }
 
     ESP_LOGI(TAG, "Successfully decoded base64 audio data, size: %u bytes", audio_data.size());
-    delete responseDoc; // 清理堆分配
+
+    // 检查并剥离可能的WAV头（火山引擎TTS有时在encoding=pcm时仍返回WAV格式）
+    if (audio_data.size() >= 4 &&
+        audio_data[0] == 'R' && audio_data[1] == 'I' &&
+        audio_data[2] == 'F' && audio_data[3] == 'F')
+    {
+        ESP_LOGI(TAG, "RIFF header detected in TTS response, stripping WAV header");
+        // 在RIFF块中搜索"data"子块找到裸PCM数据
+        size_t offset = 12; // 跳过 RIFF头(8) + WAVE标识(4)
+        while (offset + 8 <= audio_data.size()) {
+            uint32_t chunkSize = 0;
+            memcpy(&chunkSize, &audio_data[offset + 4], 4);
+            if (audio_data[offset] == 'd' && audio_data[offset+1] == 'a' &&
+                audio_data[offset+2] == 't' && audio_data[offset+3] == 'a') {
+                // 找到 "data" 块
+                size_t dataStart = offset + 8;
+                if (dataStart < audio_data.size()) {
+                    size_t remaining = audio_data.size() - dataStart;
+                    if (chunkSize > 0 && chunkSize <= remaining) {
+                        size_t originalSize = audio_data.size();
+                        std::vector<uint8_t> pcmData(
+                            audio_data.begin() + dataStart,
+                            audio_data.begin() + dataStart + chunkSize);
+                        audio_data.swap(pcmData);
+                        ESP_LOGI(TAG, "WAV header stripped: %zu bytes -> %zu bytes PCM",
+                                 originalSize, audio_data.size());
+                    }
+                }
+                break;
+            }
+            offset += 8 + chunkSize;
+        }
+    }
+
     return true;
 }
 

@@ -18,7 +18,7 @@ struct AudioDriverConfig {
         sampleRate(16000),
         bitsPerSample(I2S_BITS_PER_SAMPLE_32BIT),  // INMP441输出24位数据，使用32位I2S帧
         channelFormat(I2S_CHANNEL_FMT_ONLY_RIGHT),  // INMP441通常在右声道输出数据
-        bufferSize(65536),  // 64KB缓冲区，可存储2秒16kHz 16-bit音频
+        bufferSize(1048576),  // 1MB PSRAM缓冲区，容纳最长达~33秒的TTS音频（16kHz 16-bit）
         volume(80) {}
 };
 
@@ -91,6 +91,8 @@ public:
     // 状态查询
     size_t getAvailableData() const;
     size_t getFreeSpace() const;
+    void resetBuffer() { bufferWritePos = 0; bufferReadPos = 0; }
+    bool clearDMABuffers();
 
     // 工具方法
     static void printI2SConfig(const i2s_config_t& config);

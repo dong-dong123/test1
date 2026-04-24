@@ -84,7 +84,11 @@
       "Bash(platformio.exe run *)",
       "Bash(/c/Users/Admin/.platformio/penv/Scripts/platformio.exe test *)",
       "Bash(python test_coze_parser.py)",
-      "Bash(python test_coze_parser_simple.py)"
+      "Bash(python test_coze_parser_simple.py)",
+      "Bash(\"c:\\\\Users\\\\Admin\\\\.platformio\\\\penv\\\\Scripts\\\\platformio.exe\" run *)",
+      "Bash(export PATH=\"/c/Users/Admin/.platformio/penv/Scripts:$PATH\")",
+      "Bash(\"C:\\\\Program Files\\\\PlatformIO\\\\platformio.exe\" run)",
+      "Bash(/c/Users/Admin/.platformio/penv/Scripts/pio.exe run *)"
     ]
   }
 }

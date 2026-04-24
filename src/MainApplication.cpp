@@ -32,7 +32,11 @@ MainApplication::MainApplication()
       vadLastAudioTime(0),
       recognitionPending(false),
       recognitionTriggerTime(0),
-      recognitionActive(false) {
+      recognitionActive(false),
+      pendingRecognitionText(""),
+      pendingDialogue(false),
+      pendingSynthesisText(""),
+      pendingSynthesis(false) {
     // 初始化时间戳
     stateEntryTime = millis();
 
@@ -504,6 +508,14 @@ void MainApplication::update() {
             break;
 
         case SystemState::PLAYING:
+            // 播放完成检测（playTask在缓冲区耗尽后自动设置isPlaying=false）
+            if (!audioDriver.isPlayingActive()) {
+                ESP_LOGI(TAG, "Playback completed naturally");
+                logEvent("playback_complete", "播放完成");
+                changeState(SystemState::IDLE);
+                break;
+            }
+            // 安全超时
             if (stateDuration > 60000) { // 60秒超时
                 audioDriver.stopPlay();
                 handleError("播放超时");
@@ -679,30 +691,14 @@ void MainApplication::handleState() {
                         logEvent("recognition_success", String("识别结果: ") + recognizedText);
                         Serial.printf("[RECOGNITION] Sync recognition successful: %s\n", recognizedText.c_str());
 
-                        // 重置状态进入时间，避免后续状态超时
-                        stateEntryTime = millis();
-                        Serial.printf("[RECOGNITION] Reset state entry time after successful sync recognition\n");
-
-                        // 优化内存使用顺序：语音识别完成后等待500ms再启动对话服务
-                        // 避免连续创建多个SSL连接导致内存分配失败
-                        ESP_LOGI(TAG, "Waiting 500ms before starting dialogue service...");
-                        delay(500);
-
-                        // 对话处理
+                        // 延迟到主循环处理对话/合成，避免在recognitionActive=true时嵌套HTTP请求
+                        pendingRecognitionText = recognizedText;
+                        pendingDialogue = true;
+                        pendingSynthesis = false;
                         changeState(SystemState::THINKING);
-
-                        DialogueService* dialogue = serviceManager.getDefaultDialogueService();
-                        if (dialogue && dialogue->isAvailable()) {
-                            String response = dialogue->chat(recognizedText);
-                            logEvent("dialogue_response", String("对话响应: ") + response);
-                            playResponse(response);
-                        } else {
-                            // 降级策略：对话服务不可用时使用本地预设响应
-                            ESP_LOGW(TAG, "Dialogue service unavailable, using fallback response");
-                            String fallbackResponse = "抱歉，网络连接有问题，请稍后再试";
-                            logEvent("dialogue_fallback", "使用降级响应: " + fallbackResponse);
-                            playResponse(fallbackResponse);
-                        }
+                        ESP_LOGI(TAG, "同步识别完成，对话处理已延迟到主循环");
+                        recognitionActive = false;
+                        audioBufferPos = 0;
                     } else {
                         String error = speech->getLastError();
                         Serial.printf("[RECOGNITION] Sync recognition failed: %s\n", error.c_str());
@@ -728,10 +724,18 @@ void MainApplication::handleState() {
 
         case SystemState::THINKING:
             // AI处理中，显示思考状态
+            // 从主循环执行对话，避免嵌套在WebSocket回调中导致栈溢出
+            if (pendingDialogue) {
+                processPendingDialogue();
+            }
             break;
 
         case SystemState::SYNTHESIZING:
             // 语音合成中，显示合成状态
+            // 从主循环执行合成，避免嵌套在对话回调中导致栈溢出
+            if (pendingSynthesis) {
+                processPendingSynthesis();
+            }
             break;
 
         case SystemState::PLAYING:
@@ -1133,26 +1137,12 @@ void MainApplication::processAudioData(const uint8_t* audioData, size_t length) 
             logEvent("recognition_success", String("识别结果: ") + recognizedText);
             Serial.printf("[DEBUG] processAudioData: Sync recognition successful: %s\n", recognizedText.c_str());
 
-            // 优化内存使用顺序：语音识别完成后等待500ms再启动对话服务
-            // 避免连续创建多个SSL连接导致内存分配失败
-            ESP_LOGI(TAG, "Waiting 500ms before starting dialogue service...");
-            delay(500);
-
-            // 对话处理
+            // 延迟到主循环处理对话/合成，避免在录音任务中执行HTTP请求
+            pendingRecognitionText = recognizedText;
+            pendingDialogue = true;
+            pendingSynthesis = false;
             changeState(SystemState::THINKING);
-
-            DialogueService* dialogue = serviceManager.getDefaultDialogueService();
-            if (dialogue && dialogue->isAvailable()) {
-                String response = dialogue->chat(recognizedText);
-                logEvent("dialogue_response", String("对话响应: ") + response);
-                playResponse(response);
-            } else {
-                // 降级策略：对话服务不可用时使用本地预设响应
-                ESP_LOGW(TAG, "Dialogue service unavailable, using fallback response");
-                String fallbackResponse = "抱歉，网络连接有问题，请稍后再试";
-                logEvent("dialogue_fallback", "使用降级响应: " + fallbackResponse);
-                playResponse(fallbackResponse);
-            }
+            ESP_LOGI(TAG, "同步识别完成，对话处理已延迟到主循环");
         } else {
             String error = speech->getLastError();
             Serial.printf("[DEBUG] processAudioData: Sync recognition failed: %s\n", error.c_str());
@@ -1190,13 +1180,41 @@ void MainApplication::playResponse(const String& text) {
     if (speech->synthesize(text, audioData)) {
         logEvent("synthesis_success", String("合成成功: ") + String(audioData.size()) + " 字节");
 
+        // 写入音频数据前清理缓冲区残留（防止混入旧音频）
+        audioDriver.resetBuffer();
+
+        // 写入音频数据到环形缓冲区
+        size_t written = audioDriver.writeAudioData(audioData.data(), audioData.size());
+        size_t audioSize = audioData.size();
+
+        // 如果缓冲区不足以一次写入全部数据（长文本），启动播放边播边写
+        if (written < audioSize) {
+            Serial.printf("[AudioDriver] 缓冲区不足以容纳全部音频，启用边播边写模式: %zu/%zu\n",
+                          written, audioSize);
+            audioDriver.startPlay();
+            while (written < audioSize) {
+                size_t n = audioDriver.writeAudioData(audioData.data() + written, audioSize - written);
+                if (n > 0) {
+                    written += n;
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+            }
+        }
+
+        // 释放SRAM中的音频数据（已复制到PSRAM环形缓冲区），为播放任务栈腾出SRAM
+        std::vector<uint8_t>().swap(audioData); // 强制释放内存
+
         changeState(SystemState::PLAYING);
 
-        // 写入音频数据到缓冲区
-        size_t written = audioDriver.writeAudioData(audioData.data(), audioData.size());
         if (written > 0) {
-            audioDriver.startPlay();
+            if (!audioDriver.isPlayingActive()) {
+                audioDriver.startPlay();
+            }
             logEvent("playback_start", "开始播放");
+            if (written < audioSize) {
+                Serial.printf("[%s] WARNING: 仅写入 %zu/%zu 字节（缓冲区不足）\n", TAG, written, audioSize);
+            }
         } else {
             handleError("音频写入失败");
             changeState(SystemState::IDLE);
@@ -1227,7 +1245,7 @@ void MainApplication::logEvent(const String& event, const String& details) {
     Serial.println(message);
 }
 
-// 处理异步语音识别结果
+// 处理异步语音识别结果 - 只保存结果并设置标志，避免在WebSocket回调中执行HTTP请求
 void MainApplication::handleAsyncRecognitionResult(const AsyncRecognitionResult& result) {
     // 重置音频缓冲区（无论成功与否）
     audioBufferPos = 0;
@@ -1258,42 +1276,59 @@ void MainApplication::handleAsyncRecognitionResult(const AsyncRecognitionResult&
         ESP_LOGI(TAG, "Internal heap after cleanup: %u bytes (freed: %d bytes)",
                 afterInternal, afterInternal - beforeInternal);
 
-        // 优化内存使用顺序：语音识别完成后等待更长时间让系统稳定
-        // 避免连续创建多个SSL连接导致内存分配失败
-        if (afterInternal < 50000) {
-            ESP_LOGW(TAG, "Low memory after cleanup (%u bytes < 50KB), waiting 2 seconds...", afterInternal);
-            delay(2000);  // 内存很低时等待更久
-        } else {
-            ESP_LOGI(TAG, "Waiting 1 second before starting dialogue service...");
-            delay(1000);
-        }
-
-        // 对话处理
-        // 开始对话前记录内存状态
-        MemoryUtils::logHeapUsage("Before Thinking");
+        // 保存识别结果，延迟到主循环处理对话
+        // 避免在WebSocket回调中嵌套HTTP请求导致栈溢出
+        pendingRecognitionText = result.text;
+        pendingDialogue = true;
+        pendingSynthesis = false;
         changeState(SystemState::THINKING);
 
-        DialogueService* dialogue = serviceManager.getDefaultDialogueService();
-        if (dialogue && dialogue->isAvailable()) {
-            String response = dialogue->chat(result.text);
-            logEvent("async_dialogue_response", String("对话响应: ") + response);
-            playResponse(response);
-        } else {
-            // 降级策略：对话服务不可用时使用本地预设响应
-            ESP_LOGW(TAG, "Dialogue service unavailable, using fallback response");
-            String fallbackResponse = "抱歉，网络连接有问题，请稍后再试";
-            logEvent("dialogue_fallback", "使用降级响应: " + fallbackResponse);
-            playResponse(fallbackResponse);
-        }
+        ESP_LOGI(TAG, "对话处理已延迟到主循环执行 (pendingDialogue=true)");
     } else {
         String error = "异步语音识别失败: " + result.errorMessage + " (code: " + String(result.errorCode) + ")";
-        // 记录错误但不进入ERROR状态，提供降级响应
         logEvent("async_recognition_failed", error);
-        // 播放降级响应
-        String fallbackResponse = "抱歉，暂时无法连接到语音服务，请稍后再试";
-        ESP_LOGW(TAG, "语音识别失败，使用降级响应: %s", fallbackResponse.c_str());
-        playResponse(fallbackResponse);
-        // 返回空闲状态
-        changeState(SystemState::IDLE);
+
+        // 保存降级响应文本，延迟到主循环处理合成
+        pendingSynthesisText = "抱歉，暂时无法连接到语音服务，请稍后再试";
+        pendingSynthesis = true;
+        pendingDialogue = false;
+        changeState(SystemState::SYNTHESIZING);
+
+        ESP_LOGW(TAG, "语音识别失败，延迟处理降级响应到主循环");
     }
+}
+
+// 处理待处理的对话请求（从主循环调用，避免嵌套在WebSocket回调中）
+void MainApplication::processPendingDialogue() {
+    pendingDialogue = false;
+
+    MemoryUtils::logHeapUsage("Before Thinking");
+
+    DialogueService* dialogue = serviceManager.getDefaultDialogueService();
+    if (dialogue && dialogue->isAvailable()) {
+        String response = dialogue->chat(pendingRecognitionText);
+        logEvent("async_dialogue_response", String("对话响应: ") + response);
+
+        // 保存合成文本，由主循环处理
+        pendingSynthesisText = response;
+        pendingSynthesis = true;
+        changeState(SystemState::SYNTHESIZING);
+        ESP_LOGI(TAG, "语音合成已延迟到主循环执行 (pendingSynthesis=true)");
+    } else {
+        // 降级策略：对话服务不可用时使用本地预设响应
+        ESP_LOGW(TAG, "Dialogue service unavailable, using fallback response");
+        String fallbackResponse = "抱歉，网络连接有问题，请稍后再试";
+        logEvent("dialogue_fallback", "使用降级响应: " + fallbackResponse);
+
+        // 降级也延迟到主循环进行合成
+        pendingSynthesisText = fallbackResponse;
+        pendingSynthesis = true;
+        changeState(SystemState::SYNTHESIZING);
+    }
+}
+
+// 处理待处理的语音合成请求（从主循环调用，避免嵌套在对话回调中）
+void MainApplication::processPendingSynthesis() {
+    pendingSynthesis = false;
+    playResponse(pendingSynthesisText);
 }
