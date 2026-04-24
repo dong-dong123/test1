@@ -166,8 +166,8 @@ bool SPIFFSConfigManager::parseJSONConfig(const String& jsonStr) {
                 config.services.cozeDialogue.model = coze["model"] | "coze-model";
                 config.services.cozeDialogue.projectId = coze["projectId"] | "7625602998236004386";
                 config.services.cozeDialogue.sessionId = coze["sessionId"] | "l_tnvlo49EWy6p9YUl8oC";
-                config.services.cozeDialogue.temperature = coze["temperature"] | 0.7f;
-                config.services.cozeDialogue.maxTokens = coze["maxTokens"] | 1000;
+                config.services.cozeDialogue.temperature = coze["temperature"] | 0.95f;
+                config.services.cozeDialogue.maxTokens = coze["maxTokens"] | 8192;
                 config.services.cozeDialogue.timeout = coze["timeout"] | 15.0f;
             }
         }
@@ -365,8 +365,8 @@ String SPIFFSConfigManager::getDefaultConfigJSON() {
         "model": "coze-model",
         "projectId": "7625602998236004386",
         "sessionId": "l_tnvlo49EWy6p9YUl8oC",
-        "temperature": 0.7,
-        "maxTokens": 1000,
+        "temperature": 0.95,
+        "maxTokens": 8192,
         "timeout": 15.0
       }
     }

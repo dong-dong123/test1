@@ -27,8 +27,8 @@ struct CozeDialogueConfig {
         endpoint("https://api.coze.cn/v1/chat"),
         streamEndpoint("https://kfdcyyzqgx.coze.site/stream_run"),
         model("coze-model"),
-        temperature(0.7f),
-        maxTokens(1000),
+        temperature(0.95f),
+        maxTokens(8192),
         timeout(15.0f),
         projectId("7625602998236004386") {} // 默认项目ID
 };

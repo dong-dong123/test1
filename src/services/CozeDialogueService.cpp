@@ -111,8 +111,8 @@ bool CozeDialogueService::loadConfig() {
     config.endpoint = configManager->getString("services.dialogue.coze.endpoint", "https://api.coze.cn/v1/chat");
     config.streamEndpoint = configManager->getString("services.dialogue.coze.streamEndpoint", "https://kfdcyyzqgx.coze.site/stream_run");
     config.model = configManager->getString("services.dialogue.coze.model", "coze-model");
-    config.temperature = configManager->getFloat("services.dialogue.coze.temperature", 0.7f);
-    config.maxTokens = configManager->getInt("services.dialogue.coze.maxTokens", 1000);
+    config.temperature = configManager->getFloat("services.dialogue.coze.temperature", 0.95f);
+    config.maxTokens = configManager->getInt("services.dialogue.coze.maxTokens", 8192);
     config.timeout = configManager->getFloat("services.dialogue.coze.timeout", 15.0f);
     config.projectId = configManager->getString("services.dialogue.coze.projectId", "7625602998236004386");
     config.sessionId = configManager->getString("services.dialogue.coze.sessionId", "l_tnvlo49EWy6p9YUl8oC");
@@ -1110,8 +1110,8 @@ String CozeDialogueService::getDefaultConfigJSON() {
                 "endpoint": "https://api.coze.cn/v1/chat",
                 "streamEndpoint": "https://kfdcyyzqgx.coze.site/stream_run",
                 "model": "coze-model",
-                "temperature": 0.7,
-                "maxTokens": 1000,
+                "temperature": 0.95,
+                "maxTokens": 8192,
                 "timeout": 15.0,
                 "projectId": "7625602998236004386",
                 "sessionId": "l_tnvlo49EWy6p9YUl8oC"
@@ -1128,8 +1128,8 @@ CozeDialogueConfig CozeDialogueService::createDefaultConfig() {
     config.endpoint = "https://api.coze.cn/v1/chat";
     config.streamEndpoint = "https://kfdcyyzqgx.coze.site/stream_run";
     config.model = "coze-model";
-    config.temperature = 0.7f;
-    config.maxTokens = 1000;
+    config.temperature = 0.95f;
+    config.maxTokens = 8192;
     config.timeout = 15.0f;
     config.projectId = "7625602998236004386";
     config.sessionId = "l_tnvlo49EWy6p9YUl8oC";

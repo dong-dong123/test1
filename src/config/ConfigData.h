@@ -58,8 +58,8 @@ struct DialogueServiceConfig {
         model("coze-model"),
         projectId("7625602998236004386"),
         sessionId("l_tnvlo49EWy6p9YUl8oC"),
-        temperature(0.7f),
-        maxTokens(1000),
+        temperature(0.95f),
+        maxTokens(8192),
         timeout(15.0f) {}
 };
 
