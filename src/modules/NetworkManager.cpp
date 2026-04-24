@@ -85,7 +85,7 @@ bool NetworkManager::initialize()
 
     // 步骤1: 确保Wi-Fi完全关闭
     ESP_LOGI(TAG, "Step 1: Ensuring Wi-Fi is completely off...");
-    WiFi.disconnect(true); // 完全断开并关闭Wi-Fi
+    WiFi.disconnect(false); // 断开Wi-Fi但保留已保存的凭据
     WiFi.mode(WIFI_OFF);
     delay(200);
 
@@ -192,12 +192,7 @@ bool NetworkManager::initialize()
     // 即使显示NO_SHIELD，也继续初始化（ESP32-S3有时会这样）
 
     // 确保Wi-Fi已禁用再重新启用
-    WiFi.disconnect(true); // 清除之前保存的网络配置
-
-    // 清除WiFiManager保存的网络配置（确保使用配置文件）
-    WiFiManager tempWM;
-    tempWM.resetSettings();
-    ESP_LOGI(TAG, "Cleared WiFiManager saved settings");
+    WiFi.disconnect(false); // 断开Wi-Fi但保留已保存的凭据，以便重启后自动连接
 
     // 禁用Wi-Fi库的自动重连（使用我们自己的逻辑）
     WiFi.setAutoReconnect(false);
@@ -296,17 +291,15 @@ bool NetworkManager::deinitialize()
 
 bool NetworkManager::loadConfig()
 {
-    // 修改：不读取配置文件，强制使用WiFiManager热点模式
-    // 清空配置，让WiFiManager处理连接
+    // 使用WiFiManager热点模式处理连接，凭据由WiFiManager保存在NVS中
     wifiConfig.ssid = "";
     wifiConfig.password = "";
-    wifiConfig.autoConnect = false; // 不使用自动连接，让WiFiManager管理
-    wifiConfig.timeout = 30000;     // 增加超时时间
-    wifiConfig.maxRetries = 0;      // WiFiManager处理重试
+    wifiConfig.autoConnect = true; // 允许自动连接（WiFiManager使用NVS中已保存的凭据）
+    wifiConfig.timeout = 30000;
+    wifiConfig.maxRetries = 0;
 
-    ESP_LOGI(TAG, "WiFi configuration mode: Pure hotspot (WiFiManager only)");
-    ESP_LOGI(TAG, "Device will create hotspot 'XiaozhiAP' for mobile configuration");
-    ESP_LOGI(TAG, "No configuration file reading - using WiFiManager memory");
+    ESP_LOGI(TAG, "WiFi configuration mode: WiFiManager managed");
+    ESP_LOGI(TAG, "Saved credentials in NVS will be used for auto-connect");
 
     return true;
 }
@@ -368,8 +361,14 @@ bool NetworkManager::connect()
     // 检查是否有配置的SSID
     if (wifiConfig.ssid.isEmpty())
     {
-        ESP_LOGW(TAG, "No WiFi SSID configured, falling back to WiFiManager hotspot mode");
-        // 进入WiFiManager热点模式进行配置
+        // 先尝试用WiFiManager autoConnect从NVS读取已保存的凭据自动连接
+        // autoConnect()会先尝试连接，失败才启动热点页面
+        ESP_LOGI(TAG, "No WiFi SSID in config, trying auto-connect with NVS saved credentials...");
+        if (startWiFiManagerAutoConnect()) {
+            return true;
+        }
+        // autoConnect失败（无保存凭据或超时），启动热点模式
+        ESP_LOGW(TAG, "Auto-connect failed, starting WiFiManager hotspot for manual configuration");
         return startWiFiManagerHotspot();
     }
 
@@ -1827,11 +1826,11 @@ bool NetworkManager::startWiFiManagerHotspot()
         ESP_LOGI(TAG, "WiFiManager configuration successful");
         Serial.println("[NetworkManager] WiFi configuration successful via web portal");
 
-        // 获取实际连接的SSID并更新配置
+        // 获取实际连接的SSID并更新配置（仅记录，凭据由WiFiManager保存在NVS中）
         String connectedSSID = WiFi.SSID();
         if (connectedSSID != wifiConfig.ssid && configManager)
         {
-            // 更新配置文件中的SSID（密码WiFiManager已保存）
+            // 保存SSID到配置文件用于信息显示
             configManager->setString("wifi.ssid", connectedSSID);
             ESP_LOGI(TAG, "Updated config SSID to: %s", connectedSSID.c_str());
             Serial.printf("[NetworkManager] Updated WiFi config: %s\n", connectedSSID.c_str());

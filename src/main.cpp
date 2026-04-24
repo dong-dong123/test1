@@ -210,7 +210,7 @@ void serialEvent()
             String ssid = command.substring(firstSpace + 1, secondSpace);
             String password = command.substring(secondSpace + 1);
 
-            // 更新Wi-Fi配置
+            // 更新Wi-Fi配置并保存
             app.getConfigManager()->setString("wifi.ssid", ssid);
             app.getConfigManager()->setString("wifi.password", password);
             app.getConfigManager()->save();
@@ -218,7 +218,21 @@ void serialEvent()
             Serial.println("Wi-Fi配置已更新:");
             Serial.println("  SSID: " + ssid);
             Serial.println("  密码: " + password);
-            Serial.println("配置已保存，重启后生效");
+            Serial.println("配置已保存，正在尝试连接...");
+
+            // 立即尝试连接新WiFi，无需重启
+            if (app.isReady()) {
+                NetworkManager* networkMgr = app.getNetworkManager();
+                if (networkMgr) {
+                    WiFiConfig newConfig;
+                    newConfig.ssid = ssid;
+                    newConfig.password = password;
+                    newConfig.autoConnect = true;
+                    newConfig.timeout = 30000;
+                    newConfig.maxRetries = 3;
+                    networkMgr->updateWiFiConfig(newConfig);
+                }
+            }
           }
           else
           {
